@@ -30,9 +30,10 @@ app.use(cookieParser());
 //cors configuration
 
 app.use(cors({
-    origin:
-        process.env.CORS_ORIGIN?.split(",") ||
+    origin: [
         "http://localhost:5173",
+        "http://64.227.143.155:5173"
+    ],
     credentials: true,
     methods: [
         "GET",

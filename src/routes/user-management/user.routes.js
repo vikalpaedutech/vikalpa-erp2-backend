@@ -14,6 +14,7 @@ import { verifyJWT } from "../../middlewares/auth.middlewares.js";
 import {
   bulkOnboardUsers,
   downloadBulkUserOnboardingTemplate,
+  downloadBulkUserOnboardingRequirements,
 } from "../../controllers/user-management/bulkUserOnboarding.controllers.js";
 import { uploadSpreadsheet } from "../../middlewares/upload.middlewares.js";
 
@@ -22,6 +23,11 @@ const router = Router();
 router.use(verifyJWT);
 
 // Bulk user onboarding
+router.get(
+  "/bulk-onboard/requirements",
+  downloadBulkUserOnboardingRequirements
+);
+
 router.get(
   "/bulk-onboard/template",
   downloadBulkUserOnboardingTemplate

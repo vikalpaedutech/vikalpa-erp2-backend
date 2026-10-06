@@ -11,6 +11,9 @@ import { StudentMark } from "../../models/student-management/studentMark.models.
 import { UserAccess } from "../../models/user-management/userAccess.models.js";
 
 import { UserRegionAccess } from "../../models/user-management/userRegionAccess.models.js";
+import { UserRole } from "../../models/user-management/userRole.models.js";
+import { Program } from "../../models/program-management/prgroam.models.js";
+import { Batch } from "../../models/program-management/batch.models.js";
 
 
 /*
@@ -30,16 +33,36 @@ const getUserId = (req) => {
 };
 
 
-const isAdminUser = (req) => {
-  return (
-    req.user?.isAdmin === true ||
-    req.user?.roleCode === "admin" ||
-    req.user?.roles?.some(
-      (role) =>
-        role?.roleCode === "admin" ||
-        role?.code === "admin"
-    )
-  );
+const isAdminUser = async (req) => {
+  if (req.user?.isAdmin === true) return true;
+
+  if (req.user?.roleCode || req.user?.roleName) {
+    const directCodes = [req.user.roleCode, req.user.roleName]
+      .filter(Boolean)
+      .map((value) => String(value).trim().toLowerCase());
+
+    if (directCodes.includes("admin") || directCodes.includes("administrator")) {
+      return true;
+    }
+  }
+
+  const rows = await UserRole.find({
+    userId: req.user?._id,
+    isActive: true,
+  })
+    .populate({
+      path: "roleId",
+      match: { isActive: true },
+      select: "roleCode roleName",
+    })
+    .lean();
+
+  return rows.some((row) => {
+    const code = String(row.roleId?.roleCode || "").trim().toLowerCase();
+    const name = String(row.roleId?.roleName || "").trim().toLowerCase();
+    return code === "admin" || code === "administrator" ||
+      name === "admin" || name === "administrator";
+  });
 };
 
 
@@ -406,6 +429,44 @@ const checkEnrollmentRegionAccess = async ({
 
 /*
 ==========================================================
+VALIDATE PROGRAM + BATCH RELATIONSHIP
+==========================================================
+
+The selected batch must belong to the selected program. Both
+records must remain active for new/updated exam assignments.
+==========================================================
+*/
+const validateProgramBatchPair = async (programId, batchId, requireActive = true) => {
+  const programFilter = { _id: programId };
+  const batchFilter = { _id: batchId };
+  if (requireActive) {
+    programFilter.isActive = true;
+    batchFilter.isActive = true;
+  }
+
+  const [program, batch] = await Promise.all([
+    Program.findOne(programFilter).lean(),
+    Batch.findOne(batchFilter).lean(),
+  ]);
+
+  if (!program) {
+    return { ok: false, status: 400, message: "Selected program is not active or does not exist." };
+  }
+
+  if (!batch) {
+    return { ok: false, status: 400, message: "Selected batch is not active or does not exist." };
+  }
+
+  if (String(batch.programId) !== String(program._id)) {
+    return { ok: false, status: 400, message: "Selected batch does not belong to the selected program." };
+  }
+
+  return { ok: true, program, batch };
+};
+
+
+/*
+==========================================================
 CREATE EXAM
 ==========================================================
 */
@@ -478,6 +539,32 @@ export const createExam = async (
           "Invalid programId or batchId",
         success: false,
       });
+    }
+
+    const programBatch = await validateProgramBatchPair(programId, batchId);
+    if (!programBatch.ok) {
+      return res.status(programBatch.status).json({
+        statusCode: programBatch.status,
+        message: programBatch.message,
+        success: false,
+      });
+    }
+
+    const userId = getUserId(req);
+    if (!(await isAdminUser(req))) {
+      const allowed = await checkProgramBatchAccess({
+        userId,
+        programId,
+        batchId,
+      });
+
+      if (!allowed) {
+        return res.status(403).json({
+          statusCode: 403,
+          message: "You do not have access to the selected program and batch.",
+          success: false,
+        });
+      }
     }
 
 
@@ -700,7 +787,7 @@ export const getExams = async (
     */
 
     if (
-      !isAdminUser(req)
+      !(await isAdminUser(req))
     ) {
 
       const {
@@ -1079,7 +1166,7 @@ export const getExamById = async (
     */
 
     if (
-      !isAdminUser(req)
+      !(await isAdminUser(req))
     ) {
 
       const allowed =
@@ -1339,7 +1426,7 @@ export const getExamStudents = async (
     */
 
     if (
-      !isAdminUser(req)
+      !(await isAdminUser(req))
     ) {
 
       const programBatchAllowed =
@@ -1454,7 +1541,7 @@ export const getExamStudents = async (
     */
 
     if (
-      !isAdminUser(req)
+      !(await isAdminUser(req))
     ) {
 
       const regionFilter =
@@ -2148,6 +2235,45 @@ export const updateExam = async (
     }
 
 
+    // Resolve the final Program/Batch pair before changing the document.
+    // This catches partial updates as well as Program+Batch updates together.
+    const nextProgramId = programId !== undefined ? programId : exam.programId;
+    const nextBatchId = batchId !== undefined ? batchId : exam.batchId;
+
+    if (!isValidObjectId(nextProgramId) || !isValidObjectId(nextBatchId)) {
+      return res.status(400).json({
+        statusCode: 400,
+        message: "Invalid programId or batchId",
+        success: false,
+      });
+    }
+
+    const programBatch = await validateProgramBatchPair(nextProgramId, nextBatchId, false);
+    if (!programBatch.ok) {
+      return res.status(programBatch.status).json({
+        statusCode: programBatch.status,
+        message: programBatch.message,
+        success: false,
+      });
+    }
+
+    const userId = getUserId(req);
+    if (!(await isAdminUser(req))) {
+      const allowed = await checkProgramBatchAccess({
+        userId,
+        programId: nextProgramId,
+        batchId: nextBatchId,
+      });
+
+      if (!allowed) {
+        return res.status(403).json({
+          statusCode: 403,
+          message: "You do not have access to the selected program and batch.",
+          success: false,
+        });
+      }
+    }
+
     /*
     --------------------------------------------------------
     DUPLICATE EXAM CODE
@@ -2437,6 +2563,22 @@ export const deleteExam = async (
 
         success: false,
       });
+    }
+
+    if (!(await isAdminUser(req))) {
+      const allowed = await checkProgramBatchAccess({
+        userId: getUserId(req),
+        programId: exam.programId,
+        batchId: exam.batchId,
+      });
+
+      if (!allowed) {
+        return res.status(403).json({
+          statusCode: 403,
+          message: "You do not have access to this exam.",
+          success: false,
+        });
+      }
     }
 
 

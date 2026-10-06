@@ -502,10 +502,10 @@ export const createExam = async (
     */
 
     if (
-      !examName ||
-      !examCode ||
+      !String(examName || "").trim() ||
+      !String(examCode || "").trim() ||
       !examDate ||
-      !subject ||
+      !String(subject || "").trim() ||
       maximumMarks === undefined ||
       !programId ||
       !batchId
@@ -537,6 +537,24 @@ export const createExam = async (
         statusCode: 400,
         message:
           "Invalid programId or batchId",
+        success: false,
+      });
+    }
+
+    const parsedMaximumMarks = Number(maximumMarks);
+    if (!Number.isFinite(parsedMaximumMarks) || parsedMaximumMarks < 0) {
+      return res.status(400).json({
+        statusCode: 400,
+        message: "Maximum marks must be a valid non-negative number.",
+        success: false,
+      });
+    }
+
+    const parsedExamDate = new Date(examDate);
+    if (Number.isNaN(parsedExamDate.getTime())) {
+      return res.status(400).json({
+        statusCode: 400,
+        message: "Exam date is invalid.",
         success: false,
       });
     }
@@ -605,7 +623,7 @@ export const createExam = async (
         examCode:
           examCode.trim(),
 
-        examDate,
+        examDate: parsedExamDate,
 
         subject:
           subject.trim(),
@@ -613,7 +631,7 @@ export const createExam = async (
         examType:
           examType?.trim() || "",
 
-        maximumMarks,
+        maximumMarks: parsedMaximumMarks,
 
         programId,
 
@@ -657,6 +675,13 @@ export const createExam = async (
       error
     );
 
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        statusCode: 409,
+        message: "Exam with this exam code already exists",
+        success: false,
+      });
+    }
 
     return res.status(500).json({
       statusCode: 500,

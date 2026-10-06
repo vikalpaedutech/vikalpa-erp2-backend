@@ -3,6 +3,8 @@ import { UserPermission } from "../../models/user-management/userPermission.mode
 import { RolePermission } from "../../models/permissions-management/rolePermission.models.js";
 import { UserAccess } from "../../models/user-management/userAccess.models.js";
 import { UserRegionAccess } from "../../models/user-management/userRegionAccess.models.js";
+import { Program } from "../../models/program-management/prgroam.models.js";
+import { Batch } from "../../models/program-management/batch.models.js";
 
 export const getUserAccess = async (userId) => {
   // Get active roles assigned to the user
@@ -100,26 +102,50 @@ export const getUserAccess = async (userId) => {
 
 
 export const getUserAccessScope = async (userId) => {
+  const [userAccess, userRegionAccess, userRoles] = await Promise.all([
+    UserAccess.findOne({ userId })
+      .populate("programIds")
+      .populate("batchIds"),
+    UserRegionAccess.find({ userId })
+      .populate("districtId")
+      .populate("blockId")
+      .populate("centerId"),
+    UserRole.find({ userId, isActive: true })
+      .populate({
+        path: "roleId",
+        match: { isActive: true },
+        select: "roleCode roleName",
+      }),
+  ]);
 
-  const userAccess = await UserAccess.findOne({
-    userId,
-  })
-    .populate("programIds")
-    .populate("batchIds");
+  const isAdmin = userRoles.some((userRole) => {
+    const role = userRole?.roleId;
+    const code = String(role?.roleCode || "").trim().toLowerCase();
+    const name = String(role?.roleName || "").trim().toLowerCase();
+    return code === "admin" || code === "administrator" ||
+      name === "admin" || name === "administrator";
+  });
 
-  const userRegionAccess = await UserRegionAccess.find({
-    userId,
-  })
-    .populate("districtId")
-    .populate("blockId")
-    .populate("centerId");
+  let programs = userAccess?.programIds || [];
+  let batches = userAccess?.batchIds || [];
+
+  // Admin has global academic access. UserAccess intentionally does not need
+  // explicit programIds/batchIds for an admin, so expose the effective access
+  // here for every frontend consumer that uses /auth/my-access-scope.
+  if (isAdmin) {
+    [programs, batches] = await Promise.all([
+      Program.find({ isActive: true }).sort({ programName: 1 }),
+      Batch.find({ isActive: true })
+        .populate("programId", "programName programCode")
+        .sort({ startYear: -1, batchName: 1 }),
+    ]);
+  }
 
   return {
     programAccess: {
-      programs: userAccess?.programIds || [],
-      batches: userAccess?.batchIds || [],
+      programs,
+      batches,
     },
-
     regionAccess: userRegionAccess,
   };
 };

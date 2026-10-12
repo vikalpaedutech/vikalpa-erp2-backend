@@ -8,6 +8,8 @@ import { UserAccess } from "../../models/user-management/userAccess.models.js";
 import { UserRegionAccess } from "../../models/user-management/userRegionAccess.models.js";
 
 
+import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
+
 // ============================================================
 // HELPER FUNCTIONS
 // ============================================================
@@ -334,6 +336,8 @@ export const createStudentMark = async (req, res) => {
     // --------------------------------------------------------
     // Response
     // --------------------------------------------------------
+
+    await syncGamificationPointsForActivity({ userId, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
 
     const populatedMark = await StudentMark.findById(
       studentMark._id

@@ -76,6 +76,7 @@ import userRouter from "./routes/user-management/user.routes.js";
 
 import studentRouter from "./routes/student-management/student.routes.js";
 import studentAttendanceRouter from "./routes/student-management/studentAttendance.routes.js";
+import studentResourcesRouter from "./routes/student-management/studentResources.routes.js";
 import studentApprovalRouter from "./routes/student-management/studentApproval.routes.js";
 import studentMarkRouter from "./routes/student-management/studentMark.routes.js";
 import studentCopyCheckingRouter from "./routes/student-management/studentCopyChecking.routes.js";
@@ -218,6 +219,8 @@ app.use(
     "/api/v1/student-management/students",
     studentRouter
 );
+
+app.use("/api/v1/student-management/resources", studentResourcesRouter);
 
 app.use(
     "/api/v1/student-management/attendance",

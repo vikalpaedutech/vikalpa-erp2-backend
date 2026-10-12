@@ -6,6 +6,7 @@ import { StudentAttendance } from "../../models/student-management/studentAttend
 import { ApiError } from "../../utils/api-error.js";
 import { UserAccess } from "../../models/user-management/userAccess.models.js";
 import { UserRegionAccess } from "../../models/user-management/userRegionAccess.models.js";
+import { syncGamificationPointsForActivity } from "../gamification-management/gamificationCalculation.services.js";
 
 
 import {
@@ -142,6 +143,8 @@ const markAttendance = async (attendanceData, markedBy) => {
           $lte: endOfDay,
         },
       });
+
+    if (markedBy) await syncGamificationPointsForActivity({ userId: markedBy, date: startOfDay }).catch((error) => console.error("Gamification point sync failed:", error));
 
     return {
       studentId: student._id,
@@ -361,6 +364,8 @@ const bulkMarkAttendance = async (
         ordered: false,
       }
     );
+
+  if (markedBy) await syncGamificationPointsForActivity({ userId: markedBy, date: startOfDay }).catch((error) => console.error("Gamification point sync failed:", error));
 
   return {
     date: startOfDay,

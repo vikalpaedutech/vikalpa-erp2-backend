@@ -11,7 +11,7 @@ import { GamificationParticipant } from "../../models/gamification-management/ga
 import { GamificationCriteria } from "../../models/gamification-management/gamificationCriteria.models.js";
 import { GamificationUserPoint } from "../../models/gamification-management/gamificationUserPoints.models.js";
 import { GamificationUserRank } from "../../models/gamification-management/gamificationUserRanks.models.js";
-import { getOrCreateCriteria, initiateGamification, updateMonthlyRanking, monthStart, monthEnd } from "../../services/gamification-management/gamificationCalculation.services.js";
+import { getOrCreateCriteria, initiateGamification, initiateGamificationDaily, updateMonthlyRanking, monthStart, monthEnd } from "../../services/gamification-management/gamificationCalculation.services.js";
 
 const isAdmin = async (userId) => {
   const roles = await UserRole.find({ userId, isActive: true }).populate("roleId","roleCode").lean();
@@ -142,7 +142,10 @@ export const initiateGamificationCalculation = async (req, res) => {
       });
     }
 
-    const result = await initiateGamification({
+    // Ranking actions must consume the existing point ledger only.
+    // Point events are derived from user activity and must not be manually
+    // recreated/deleted by an administrator ranking action.
+    const result = await updateMonthlyRanking({
       month,
       initiatedBy: admin,
     });
@@ -150,14 +153,31 @@ export const initiateGamificationCalculation = async (req, res) => {
     return res.json({
       success: true,
       data: result,
-      message:
-        "Gamification source data recalculated and monthly ranking updated.",
+      message: "Monthly ranking calculated from existing user points.",
     });
   } catch (e) {
     return res
       .status(e.statusCode || 500)
       .json({ success: false, message: e.message });
   }
+};
+
+export const initiateGamificationDailyCalculation = async (req, res) => {
+  try {
+    const admin = await requireAdmin(req);
+    const date = clean(req.body?.date) || new Date().toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(`${date}T00:00:00.000Z`).getTime())) {
+      return res.status(400).json({ success: false, message: "date must be YYYY-MM-DD." });
+    }
+    // Rebuild point events for the selected date from persisted source activity,
+    // then refresh the monthly rank snapshot with that date's points included.
+    // This makes the daily button useful when an activity sync was missed.
+    const result = await initiateGamificationDaily({
+      date: new Date(`${date}T00:00:00.000Z`),
+      initiatedBy: admin,
+    });
+    return res.json({ success: true, data: { ...result, date }, message: `Daily points and ranking recalculated for ${date}.` });
+  } catch (e) { return res.status(e.statusCode || 500).json({ success: false, message: e.message }); }
 };
 
 export const updateGamificationMonthlyRanking = async (

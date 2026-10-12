@@ -9,6 +9,7 @@ import {
   getGamificationCriteria,
   updateGamificationCriteria,
   initiateGamificationCalculation,
+  initiateGamificationDailyCalculation,
   updateGamificationMonthlyRanking,
   getMyGamificationDashboard,
   getGamificationLeaderboard,
@@ -33,6 +34,7 @@ router.get("/criteria", getGamificationCriteria);
 router.put("/criteria", updateGamificationCriteria);
 
 router.post("/initiate", initiateGamificationCalculation);
+router.post("/initiate-daily", initiateGamificationDailyCalculation);
 router.post("/update-ranking", updateGamificationMonthlyRanking);
 router.get("/leaderboard", getGamificationLeaderboard);
 router.get("/report/download", downloadGamificationReport);

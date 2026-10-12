@@ -811,3 +811,73 @@ export const initiateGamification = async ({
     month,
   };
 };
+
+
+// Recalculate a single day only. This avoids rebuilding the entire month's source ledger.
+export const initiateGamificationDaily = async ({ date, initiatedBy }) => {
+  await prepareRankStorage();
+  const dayStart = startOfDay(date);
+  const dayEnd = endOfDay(dayStart);
+  const month = `${dayStart.getUTCFullYear()}-${String(dayStart.getUTCMonth()+1).padStart(2,"0")}`;
+  const criteria = await getOrCreateCriteria();
+  const participants = await GamificationParticipant.find({ isActive: true }).lean();
+  const userIds = participants.map((p) => p.userId);
+  if (!userIds.length) return { date: dayStart, month, totalParticipants: 0, totalPointEvents: 0, totalRanks: 0 };
+
+  // Replace only this day's generated points for these participants.
+  await GamificationUserPoint.deleteMany({ userId: { $in: userIds }, eventDate: { $gte: dayStart, $lte: dayEnd } });
+  const points = [];
+  for (const participant of participants) {
+    const dayPoints = await calculateParticipantDay(participant, dayStart, criteria);
+    for (const item of dayPoints) item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+    points.push(...dayPoints);
+    const markPoints = await calculateParticipantMarks(participant, dayStart, dayEnd, criteria);
+    for (const item of markPoints) item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+    points.push(...markPoints);
+  }
+  if (points.length) await GamificationUserPoint.insertMany(points, { ordered: false });
+  const rankResult = await updateMonthlyRanking({ month, initiatedBy, rankingDate: dayStart });
+  return { date: dayStart, month, totalParticipants: participants.length, totalPointEvents: points.length, totalRanks: rankResult.totalRanks };
+};
+
+
+/**
+ * Rebuild one participant's point events for the activity date from persisted
+ * source records. This is invoked by activity controllers after a successful
+ * write; it deliberately does not calculate ranks. Rank documents remain an
+ * admin-triggered operation.
+ */
+export const syncGamificationPointsForActivity = async ({ userId, date = new Date() }) => {
+  if (!userId) return { skipped: true, reason: "missing-user" };
+  const dayStart = startOfDay(date);
+  const dayEnd = endOfDay(dayStart);
+  const month = `${dayStart.getUTCFullYear()}-${String(dayStart.getUTCMonth() + 1).padStart(2, "0")}`;
+  const criteria = await getOrCreateCriteria();
+  const participant = await GamificationParticipant.findOne({ userId, isActive: true }).lean();
+  if (!participant) return { skipped: true, reason: "not-active-participant" };
+
+  // Recompute daily activities (attendance, PDF, calls and monitoring) only
+  // for this user/day, preserving other dates and other users' point history.
+  const dailyPoints = await calculateParticipantDay(participant, dayStart, criteria);
+  for (const item of dailyPoints) {
+    item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+  }
+  await GamificationUserPoint.deleteMany({
+    userId,
+    eventDate: { $gte: dayStart, $lte: dayEnd },
+    eventType: { $ne: "Marks" },
+  });
+  if (dailyPoints.length) await GamificationUserPoint.insertMany(dailyPoints, { ordered: false });
+
+  // Marks are evaluated per exam/month, so refresh only this user's marks
+  // events for the selected month, without touching the other event types.
+  const ms = monthStart(month);
+  const me = monthEnd(month);
+  const markPoints = await calculateParticipantMarks(participant, ms, me, criteria);
+  for (const item of markPoints) {
+    item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+  }
+  await GamificationUserPoint.deleteMany({ userId, eventType: "Marks", eventDate: { $gte: ms, $lte: me } });
+  if (markPoints.length) await GamificationUserPoint.insertMany(markPoints, { ordered: false });
+  return { userId, date: dayStart, dailyPointEvents: dailyPoints.length, marksPointEvents: markPoints.length };
+};

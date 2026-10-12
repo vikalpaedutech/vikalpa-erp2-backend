@@ -12,6 +12,7 @@ import {
 } from "../../controllers/student-management/studentAttendance.controllers.js";
 
 import { verifyJWT } from "../../middlewares/auth.middlewares.js";
+import { requirePermission } from "../../middlewares/permission.middlewares.js";
 
 const router = Router();
 
@@ -33,7 +34,7 @@ router
 // Bulk mark attendance as Present
 router
   .route("/bulk")
-  .post(bulkMarkAttendance);
+  .post(requirePermission("student-attendance.mark-all-present"), bulkMarkAttendance);
 
 // Get attendance for students
 router

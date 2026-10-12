@@ -10,6 +10,8 @@ import {
 } from "../../utils/space.utils.js";
 
 
+import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
+
 // ============================================================
 // CREATE USER ATTENDANCE
 // ============================================================
@@ -351,6 +353,8 @@ export const createUserAttendance = async (req, res) => {
     // ========================================================
     // RESPONSE
     // ========================================================
+
+    await syncGamificationPointsForActivity({ userId: attendanceUserId, date: attendanceDate }).catch((error) => console.error("Gamification point sync failed:", error));
 
     return res.status(201).json({
       success: true,

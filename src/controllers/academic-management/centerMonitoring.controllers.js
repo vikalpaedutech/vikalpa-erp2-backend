@@ -33,6 +33,8 @@ import {
 } from "../../models/region-management/district.models.js";
 
 
+import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
+
 // ============================================================
 // CONSTANTS
 // ============================================================
@@ -601,6 +603,8 @@ export const createCenterMonitoring =
             userId,
         });
 
+
+      await syncGamificationPointsForActivity({ userId, date: monitoringDate }).catch((error) => console.error("Gamification point sync failed:", error));
 
       return res.status(201).json({
         success: true,

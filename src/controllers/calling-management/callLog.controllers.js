@@ -9,6 +9,8 @@ import { ApiError } from "../../utils/api-error.js";
 import { ApiResponse } from "../../utils/api-response.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 
+import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
+
 
 // Create Call Log
 const createCallLog = asyncHandler(async (req, res) => {
@@ -124,6 +126,8 @@ const createCallLog = asyncHandler(async (req, res) => {
             calledBy:
                 req.user._id,
         });
+
+        await syncGamificationPointsForActivity({ userId: req.user?._id, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
 
 
     return res.status(201).json(
@@ -764,6 +768,8 @@ const createCallAttempt = asyncHandler(async (req, res) => {
                 req.user._id,
         });
 
+        await syncGamificationPointsForActivity({ userId: req.user?._id, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
+
 
     // ============================================================
     // RESPONSE
@@ -789,4 +795,6 @@ export {
     updateCallLog,
     deleteCallLog,
     createCallAttempt 
-};
+}
+
+;

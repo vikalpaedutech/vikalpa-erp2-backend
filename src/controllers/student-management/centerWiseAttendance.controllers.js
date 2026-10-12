@@ -12,12 +12,15 @@ import { CenterWiseAttendance } from "../../models/student-management/centerWise
 import { Center } from "../../models/region-management/center.models.js";
 import { UserAccess } from "../../models/user-management/userAccess.models.js";
 import { UserRegionAccess } from "../../models/user-management/userRegionAccess.models.js";
+import { UserRole } from "../../models/user-management/userRole.models.js";
 import spacesClient from "../../config/spaces.js";
 
 import PDFDocument from "pdfkit";
 import { StudentEnrollment } from "../../models/student-management/studentEnrollment.models.js";
 
 
+
+import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
 
 // ============================================================
 // HELPER FUNCTIONS
@@ -31,12 +34,22 @@ const getUserId = (req) => {
   return req.user?._id || req.user?.id;
 };
 
-const isAdminUser = (req) => {
-  return (
-    req.user?.isAdmin === true ||
-    req.user?.roleCode === "admin" ||
-    req.user?.roles?.some((role) => role.roleCode === "admin")
-  );
+const isAdminUser = async (req) => {
+  if (req.user?.isAdmin === true) return true;
+  const directCodes = [req.user?.roleCode, req.user?.roleName, req.user?.role,
+    ...(Array.isArray(req.user?.roles) ? req.user.roles.flatMap((role) => [role?.roleCode, role?.roleName, role?.name]) : [])]
+    .filter(Boolean).map((value) => String(value).trim().toLowerCase());
+  if (directCodes.some((code) => code === "admin" || code === "administrator")) return true;
+  const userId = getUserId(req);
+  if (!userId) return false;
+  const assignedRoles = await UserRole.find({ userId, isActive: true })
+    .populate({ path: "roleId", select: "roleCode roleName isActive" }).lean();
+  return assignedRoles.some(({ roleId }) => {
+    if (!roleId || roleId.isActive === false) return false;
+    const code = String(roleId.roleCode || "").trim().toLowerCase();
+    const name = String(roleId.roleName || "").trim().toLowerCase();
+    return code === "admin" || code === "administrator" || name === "admin" || name === "administrator";
+  });
 };
 
 
@@ -123,28 +136,21 @@ export const createCenterWiseAttendance = async (req, res) => {
     const userId = getUserId(req);
 
     const {
-      districtId,
-      blockId,
       centerId,
       batchId,
       date,
     } = req.body;
+    let districtId;
+    let blockId;
 
     // --------------------------------------------------------
     // Required fields
     // --------------------------------------------------------
 
-    if (
-      !districtId ||
-      !blockId ||
-      !centerId ||
-      !batchId ||
-      !date
-    ) {
+    if (!centerId || !batchId || !date) {
       return res.status(400).json({
         success: false,
-        message:
-          "districtId, blockId, centerId, batchId and date are required",
+        message: "centerId, batchId and date are required",
       });
     }
 
@@ -159,16 +165,10 @@ export const createCenterWiseAttendance = async (req, res) => {
     // ObjectId validation
     // --------------------------------------------------------
 
-    if (
-      !isValidObjectId(districtId) ||
-      !isValidObjectId(blockId) ||
-      !isValidObjectId(centerId) ||
-      !isValidObjectId(batchId)
-    ) {
+    if (!isValidObjectId(centerId) || !isValidObjectId(batchId)) {
       return res.status(400).json({
         success: false,
-        message:
-          "Invalid districtId, blockId, centerId or batchId",
+        message: "Invalid centerId or batchId",
       });
     }
 
@@ -198,6 +198,18 @@ export const createCenterWiseAttendance = async (req, res) => {
       });
     }
 
+    // District and block are authoritative properties of the selected center.
+    // Never require the client to submit duplicate hierarchy fields.
+    districtId = center.districtId;
+    blockId = center.blockId;
+
+    if (!districtId || !blockId) {
+      return res.status(400).json({
+        success: false,
+        message: "Selected center is missing its district/block mapping.",
+      });
+    }
+
     if (
       center.districtId.toString() !== districtId.toString()
     ) {
@@ -222,7 +234,7 @@ export const createCenterWiseAttendance = async (req, res) => {
     // Authorization
     // --------------------------------------------------------
 
-    if (!isAdminUser(req)) {
+    if (!(await isAdminUser(req))) {
       const batchAllowed = await checkBatchAccess({
         userId,
         batchId,
@@ -350,6 +362,8 @@ export const createCenterWiseAttendance = async (req, res) => {
     // --------------------------------------------------------
     // Populate response
     // --------------------------------------------------------
+
+    await syncGamificationPointsForActivity({ userId, date: attendanceDate }).catch((error) => console.error("Gamification point sync failed:", error));
 
     const populatedRecord =
       await CenterWiseAttendance.findById(
@@ -513,7 +527,7 @@ export const getCenterWiseAttendances = async (req, res) => {
     // Non-admin access
     // --------------------------------------------------------
 
-    if (!isAdminUser(req)) {
+    if (!(await isAdminUser(req))) {
       const userAccess =
         await UserAccess.findOne({
           userId,
@@ -824,7 +838,7 @@ export const getCenterWiseAttendanceById =
       // Authorization
       // ------------------------------------------------------
 
-      if (!isAdminUser(req)) {
+      if (!(await isAdminUser(req))) {
         const batchAllowed =
           await checkBatchAccess({
             userId,
@@ -913,7 +927,7 @@ export const getCenterWiseAttendanceFileUrl =
       // Authorization
       // ------------------------------------------------------
 
-      if (!isAdminUser(req)) {
+      if (!(await isAdminUser(req))) {
         const batchAllowed =
           await checkBatchAccess({
             userId,
@@ -1027,7 +1041,7 @@ export const deleteCenterWiseAttendance =
       // Authorization
       // ------------------------------------------------------
 
-      if (!isAdminUser(req)) {
+      if (!(await isAdminUser(req))) {
         const batchAllowed =
           await checkBatchAccess({
             userId,
@@ -1172,7 +1186,7 @@ export const downloadCenterWiseAttendanceTemplate =
       // Non-admin access
       // ----------------------------------------------------
 
-      if (!isAdminUser(req)) {
+      if (!(await isAdminUser(req))) {
         const userAccess =
           await UserAccess.findOne({
             userId,

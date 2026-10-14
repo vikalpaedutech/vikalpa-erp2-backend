@@ -23,6 +23,14 @@ const getUserId = (req) => {
   return req.user?._id || req.user?.id;
 };
 
+const syncMarksGamification = async ({ actorUserId, previousUserId, examId }) => {
+  const userIds = [...new Set([actorUserId, previousUserId].filter(Boolean).map(String))];
+  await Promise.all(userIds.map((userId) =>
+    syncGamificationPointsForActivity({ userId, date: new Date(), examId })
+      .catch((error) => console.error("Gamification marks sync failed:", error))
+  ));
+};
+
 
 const isAdminUser = (req) => {
   return (
@@ -337,7 +345,7 @@ export const createStudentMark = async (req, res) => {
     // Response
     // --------------------------------------------------------
 
-    await syncGamificationPointsForActivity({ userId, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
+    await syncMarksGamification({ actorUserId: userId, previousUserId: null, examId });
 
     const populatedMark = await StudentMark.findById(
       studentMark._id
@@ -934,6 +942,11 @@ export const updateStudentMark = async (req, res) => {
 
     if (obtainedMarks === "" || obtainedMarks === null) {
       await StudentMark.findByIdAndDelete(markId);
+      await syncMarksGamification({
+        actorUserId: userId,
+        previousUserId: mark.filledBy,
+        examId: mark.examId,
+      });
 
       return res.status(200).json({
         success: true,
@@ -1027,6 +1040,12 @@ export const updateStudentMark = async (req, res) => {
       .populate("filledBy", "name email")
       .lean();
 
+    await syncMarksGamification({
+      actorUserId: userId,
+      previousUserId: mark.filledBy,
+      examId: mark.examId,
+    });
+
     return res.status(200).json({
       success: true,
       message: "Student marks updated successfully",
@@ -1118,6 +1137,11 @@ export const deleteStudentMark = async (req, res) => {
     // --------------------------------------------------------
 
     await StudentMark.findByIdAndDelete(markId);
+    await syncMarksGamification({
+      actorUserId: userId,
+      previousUserId: mark.filledBy,
+      examId: mark.examId,
+    });
 
     return res.status(200).json({
       success: true,

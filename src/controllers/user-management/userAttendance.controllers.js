@@ -1209,6 +1209,10 @@ export const updateUserAttendance =
 
       await attendance.save();
 
+      await syncGamificationPointsForActivity({
+        userId: attendance.userId,
+        date: attendance.date || attendance.createdAt || new Date(),
+      }).catch((error) => console.error("Gamification user attendance update sync failed:", error));
 
       // ======================================================
       // DELETE OLD PHOTO
@@ -1348,6 +1352,11 @@ export const checkoutUserAttendance = async (req, res) => {
 
     attendance.checkOut = new Date();
     await attendance.save();
+
+    await syncGamificationPointsForActivity({
+      userId: attendance.userId,
+      date: attendance.date || attendance.createdAt || new Date(),
+    }).catch((error) => console.error("Gamification user attendance checkout sync failed:", error));
 
     return res.status(200).json({
       success: true,

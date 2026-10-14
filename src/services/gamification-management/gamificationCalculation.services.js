@@ -63,6 +63,47 @@ const classification = (points) => points > 0 ? "Positive" : points < 0 ? "Negat
 const dayKey = (d) => startOfDay(d).toISOString().slice(0,10);
 const eventKey = (...parts) => parts.map((x)=>String(x ?? "")).join("|");
 
+// Stable identities prevent activity edits from creating a second point event.
+// Marks are keyed by exam (not update date); batch-scoped activities are keyed
+// by user + day + activity + assignment.
+const pointEventKey = (item) => {
+  if (item.eventType === "Marks") {
+    return eventKey(item.userId, item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+  }
+  if (["Student Attendance", "Calling Absentee", "PDF Upload", "Disciplinary"].includes(item.eventType) && item.programId && item.batchId && item.centerId) {
+    return eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.programId, item.batchId, item.centerId);
+  }
+  return eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+};
+
+/**
+ * Upsert the newly calculated events first, then remove obsolete events in
+ * the same logical scope. If an upsert fails, existing points are not wiped.
+ * Stable event keys make repeated activity syncs idempotent.
+ */
+const replacePointEvents = async (scope, points) => {
+  const normalizedPoints = Array.isArray(points) ? points : [];
+  const keys = [...new Set(normalizedPoints.map((point) => point.eventKey).filter(Boolean))];
+
+  if (normalizedPoints.length) {
+    await GamificationUserPoint.bulkWrite(
+      normalizedPoints.map((point) => ({
+        updateOne: {
+          filter: { eventKey: point.eventKey },
+          update: { $set: point },
+          upsert: true,
+        },
+      })),
+      { ordered: true }
+    );
+  }
+
+  const staleFilter = keys.length
+    ? { ...scope, eventKey: { $nin: keys } }
+    : scope;
+  await GamificationUserPoint.deleteMany(staleFilter);
+};
+
 let rankStoragePrepared = false;
 
 const prepareRankStorage = async () => {
@@ -74,9 +115,11 @@ const prepareRankStorage = async () => {
 
     const legacyIndex = indexes.find(
       (index) =>
-        index.name ===
-          "userId_1_periodType_1_periodStart_1" ||
-        index.key?.periodType === 1
+        index.name === "userId_1_periodType_1_periodStart_1" &&
+        index.unique === true &&
+        index.key?.userId === 1 &&
+        index.key?.periodType === 1 &&
+        index.key?.periodStart === 1
     );
 
     if (legacyIndex?.name) {
@@ -91,12 +134,9 @@ const prepareRankStorage = async () => {
       }
     }
 
-    // The old schema stored separate Daily/Monthly documents.
-    // Those documents are intentionally removed because the new schema
-    // stores exactly one monthly summary document per participant.
-    await GamificationUserRank.deleteMany({
-      periodType: { $exists: true },
-    });
+    // Preserve legacy rank documents. The current application reads the
+    // year/month summary shape; legacy rows remain available for audit or
+    // a separately planned migration instead of being deleted on first use.
   } catch (error) {
     console.error(
       "Gamification rank storage migration failed:",
@@ -166,7 +206,14 @@ async function calculateParticipantDay(participant, date, criteria) {
     const enrollments=await StudentEnrollment.find({programId:a.programId,batchId:a.batchId,centerId:a.centerId,status:{$nin:["left","completed"]}}).select("_id studentId class").lean();
     const enrollmentIds=enrollments.map(x=>x._id), studentIds=enrollments.map(x=>x.studentId);
     if(!studentIds.length) continue;
-    const attendance=await StudentAttendance.find({markedBy:userId,date:{$gte:dayStart,$lte:dayEnd},studentId:{$in:studentIds}}).sort({createdAt:1}).lean();
+    const attendance=await StudentAttendance.find({
+      markedBy: userId,
+      date: { $gte: dayStart, $lte: dayEnd },
+      $or: [
+        { enrollmentId: { $in: enrollmentIds } },
+        { enrollmentId: null, studentId: { $in: studentIds } },
+      ],
+    }).sort({ createdAt: 1 }).lean();
     const presentCount=attendance.filter((record)=>record.status==="Present").length;
     const rule=findRangeRule(criteria.studentAttendance,presentCount);
     if(rule && attendance.length) {
@@ -183,31 +230,104 @@ async function calculateParticipantDay(participant, date, criteria) {
       }
     }
     const monitoring=await CenterMonitoring.find({programId:a.programId,batchId:a.batchId,centerId:a.centerId,date:{$gte:dayStart,$lte:dayEnd}}).sort({createdAt:1}).lean();
-    const firstTwo=monitoring.slice(0,2);
-    const userMonitoring=firstTwo.find(x=>String(x.markedBy)===String(userId));
-    if(userMonitoring){
-      const class9or10=enrollments.filter(x=>[9,10].includes(Number(x.class))).length;
-      const rule=findRangeRule(criteria.disciplinary,class9or10);
-      if(rule){
-        const grade=userMonitoring.discipline;
-        let multiplier=0;
-        if(grade==="Poor") multiplier=-0.5;
-        if(grade==="Good") multiplier=0.25;
-        if(grade==="Excellent") multiplier=0.5;
-        const p=Number(rule.point||0)*multiplier;
-        addPoint(points,{userId,eventDate:dayStart,eventType:"Disciplinary",sourceId:userMonitoring._id,sourceModel:"CenterMonitoring",programId:a.programId,batchId:a.batchId,centerId:a.centerId,points:p,ruleId:rule._id,metricValue:class9or10,eventTime:userMonitoring.createdAt,description:`${grade} monitoring grade for ${class9or10} class 9/10 students`});
+    const firstTwo = monitoring.slice(0, 2);
+    const userMonitoringRecords = firstTwo.filter(
+      (record) => String(record.markedBy) === String(userId)
+    );
+    if (userMonitoringRecords.length) {
+      const class9or10 = enrollments.filter((x) => [9, 10].includes(Number(x.class))).length;
+      const rule = findRangeRule(criteria.disciplinary, class9or10);
+      if (rule) {
+        // Every eligible monitoring record among the first two contributes its
+        // grade multiplier. This prevents an earlier "Camera Off"/"Average"
+        // record from masking a later valid grade by the same monitor.
+        const multiplierForGrade = (grade) => {
+          if (grade === "Poor") return -0.5;
+          if (grade === "Good") return 0.25;
+          if (grade === "Excellent") return 0.5;
+          return 0;
+        };
+        const pointsValue = userMonitoringRecords.reduce(
+          (sum, record) => sum + Number(rule.point || 0) * multiplierForGrade(record.discipline),
+          0
+        );
+        const source = userMonitoringRecords[0];
+        const latest = userMonitoringRecords[userMonitoringRecords.length - 1];
+        addPoint(points, {
+          userId,
+          eventDate: dayStart,
+          eventType: "Disciplinary",
+          sourceId: source._id,
+          sourceModel: "CenterMonitoring",
+          programId: a.programId,
+          batchId: a.batchId,
+          centerId: a.centerId,
+          points: pointsValue,
+          ruleId: rule._id,
+          metricValue: class9or10,
+          eventTime: latest.createdAt,
+          description: `${userMonitoringRecords.map((record) => record.discipline).join(" + ")} monitoring grade for ${class9or10} class 9/10 students`,
+        });
       }
     }
   }
-  const callLogs=await CallLog.find({calledBy:userId,createdAt:{$gte:dayStart,$lte:dayEnd}}).populate("callingTypeId","callingTitle callingTypeCode").populate({path:"callingDetailId",select:"calledCenter"}).sort({createdAt:1}).lean();
-  const absenteeLogs=callLogs.filter(c=>/absentee/i.test(`${c.callingTypeId?.callingTitle||""} ${c.callingTypeId?.callingTypeCode||""}`));
-  if(absenteeLogs.length){
-    const rule=findRangeRule(criteria.callingAbsentee,absenteeLogs.length);
-    if(rule){
-      const first=absenteeLogs[0];
-      const lastLog=absenteeLogs[absenteeLogs.length-1];
-      const p=afterCutoff(new Date(lastLog.createdAt),rule.timeValidation)?Number(rule.negativeMarkingOnBreakingTimeValidation||0):Number(rule.point||0);
-      addPoint(points,{userId,eventDate:dayStart,eventType:"Calling Absentee",sourceId:first._id,sourceModel:"CallLog",points:p,ruleId:rule._id,metricValue:absenteeLogs.length,eventTime:lastLog.createdAt,description:rule.description||`Absentee calls: ${absenteeLogs.length}`});
+  const callLogs = await CallLog.find({
+    calledBy: userId,
+    createdAt: { $gte: dayStart, $lte: dayEnd },
+  })
+    .populate("callingTypeId", "callingTitle callingTypeCode description")
+    .populate({
+      path: "callingDetailId",
+      select: "calledCenter enrollmentId",
+      populate: { path: "enrollmentId", select: "programId batchId centerId" },
+    })
+    .sort({ createdAt: 1 })
+    .lean();
+  const absenteeLogs=callLogs.filter((c)=>/absentee|absent|student[ _-]?attendance/i.test(
+    `${c.callingTypeId?.callingTitle || ""} ${c.callingTypeId?.callingTypeCode || ""} ${c.callingTypeId?.description || ""}`
+  ));
+  if (absenteeLogs.length) {
+    // When call details are linked to an enrollment, score each assigned
+    // program/batch/center separately. Legacy calls without enrollment data
+    // remain in one unscoped bucket so their points are not silently lost.
+    const callGroups = new Map();
+    for (const call of absenteeLogs) {
+      const enrollment = call.callingDetailId?.enrollmentId;
+      const assignment = enrollment
+        ? assignments.find((a) => assignmentMatch(a, enrollment.programId, enrollment.batchId, enrollment.centerId))
+        : null;
+      const key = assignment
+        ? `${assignment.programId}|${assignment.batchId}|${assignment.centerId}`
+        : "unassigned";
+      if (!callGroups.has(key)) callGroups.set(key, { assignment, calls: [] });
+      callGroups.get(key).calls.push(call);
+    }
+
+    for (const { assignment, calls } of callGroups.values()) {
+      const rule = findRangeRule(criteria.callingAbsentee, calls.length);
+      if (!rule) continue;
+      const first = calls[0];
+      const lastLog = calls[calls.length - 1];
+      const pointsValue = afterCutoff(new Date(lastLog.createdAt), rule.timeValidation)
+        ? Number(rule.negativeMarkingOnBreakingTimeValidation || 0)
+        : Number(rule.point || 0);
+      addPoint(points, {
+        userId,
+        eventDate: dayStart,
+        eventType: "Calling Absentee",
+        sourceId: first._id,
+        sourceModel: "CallLog",
+        ...(assignment ? {
+          programId: assignment.programId,
+          batchId: assignment.batchId,
+          centerId: assignment.centerId,
+        } : {}),
+        points: pointsValue,
+        ruleId: rule._id,
+        metricValue: calls.length,
+        eventTime: lastLog.createdAt,
+        description: rule.description || `Absentee calls: ${calls.length}`,
+      });
     }
   }
   return points;
@@ -295,6 +415,12 @@ const calculateParticipantMarks = async (
     }
 
     for (const [examId, examMarks] of marksByExam) {
+      // Gamification points are awarded only while there is at least one
+      // positive submitted mark for the exam. If all entries are cleared or
+      // reset to zero, the derived event is removed on the next sync.
+      const eligibleMarks = examMarks.filter((mark) => Number(mark.obtainedMarks) > 0);
+      if (!eligibleMarks.length) continue;
+
       const latestMark = examMarks.reduce((latest, current) => {
         if (!latest) return current;
 
@@ -327,7 +453,7 @@ const calculateParticipantMarks = async (
         )
       );
 
-      const metricValue = examMarks.length;
+      const metricValue = eligibleMarks.length;
       const rule = findRangeRule(criteria.marks, metricValue);
 
       if (!rule) continue;
@@ -392,18 +518,24 @@ const aggregateRankData = async ({
           },
         },
         eventCount: { $sum: 1 },
-        earliestAttendanceAt: {
-          $min: {
-            $cond: [
-              { $eq: ["$eventType", "Self Attendance"] },
-              "$eventTime",
-              null,
-            ],
-          },
-        },
       },
     },
   ]);
+
+  const monthAttendanceAgg = await GamificationUserPoint.aggregate([
+    {
+      $match: {
+        userId: { $in: userIds },
+        eventDate: { $gte: start, $lte: end },
+        eventType: "Self Attendance",
+        eventTime: { $ne: null },
+      },
+    },
+    { $group: { _id: "$userId", earliestAttendanceAt: { $min: "$eventTime" } } },
+  ]);
+  const monthAttendanceMap = new Map(
+    monthAttendanceAgg.map((row) => [String(row._id), row.earliestAttendanceAt])
+  );
 
   const monthMap = new Map(
     monthAgg.map((row) => [String(row._id), row])
@@ -432,18 +564,24 @@ const aggregateRankData = async ({
         _id: "$userId",
         totalPoints: { $sum: "$points" },
         eventCount: { $sum: 1 },
-        earliestAttendanceAt: {
-          $min: {
-            $cond: [
-              { $eq: ["$eventType", "Self Attendance"] },
-              "$eventTime",
-              null,
-            ],
-          },
-        },
       },
     },
   ]);
+
+  const todayAttendanceAgg = await GamificationUserPoint.aggregate([
+    {
+      $match: {
+        userId: { $in: userIds },
+        eventDate: { $gte: safeRankingDate, $lte: endOfDay(safeRankingDate) },
+        eventType: "Self Attendance",
+        eventTime: { $ne: null },
+      },
+    },
+    { $group: { _id: "$userId", earliestAttendanceAt: { $min: "$eventTime" } } },
+  ]);
+  const todayAttendanceMap = new Map(
+    todayAttendanceAgg.map((row) => [String(row._id), row.earliestAttendanceAt])
+  );
 
   const todayMap = new Map(
     todayAgg.map((row) => [String(row._id), row])
@@ -468,12 +606,14 @@ const aggregateRankData = async ({
       return Number(b.totalPoints) - Number(a.totalPoints);
     }
 
-    const aTime = a.earliestAttendanceAt
-      ? new Date(a.earliestAttendanceAt).getTime()
+    const aAttendance = monthAttendanceMap.get(String(a._id));
+    const bAttendance = monthAttendanceMap.get(String(b._id));
+    const aTime = aAttendance
+      ? new Date(aAttendance).getTime()
       : Number.MAX_SAFE_INTEGER;
 
-    const bTime = b.earliestAttendanceAt
-      ? new Date(b.earliestAttendanceAt).getTime()
+    const bTime = bAttendance
+      ? new Date(bAttendance).getTime()
       : Number.MAX_SAFE_INTEGER;
 
     if (aTime !== bTime) return aTime - bTime;
@@ -504,12 +644,14 @@ const aggregateRankData = async ({
       return Number(b.totalPoints) - Number(a.totalPoints);
     }
 
-    const aTime = a.earliestAttendanceAt
-      ? new Date(a.earliestAttendanceAt).getTime()
+    const aAttendance = todayAttendanceMap.get(String(a._id));
+    const bAttendance = todayAttendanceMap.get(String(b._id));
+    const aTime = aAttendance
+      ? new Date(aAttendance).getTime()
       : Number.MAX_SAFE_INTEGER;
 
-    const bTime = b.earliestAttendanceAt
-      ? new Date(b.earliestAttendanceAt).getTime()
+    const bTime = bAttendance
+      ? new Date(bAttendance).getTime()
       : Number.MAX_SAFE_INTEGER;
 
     if (aTime !== bTime) return aTime - bTime;
@@ -722,18 +864,8 @@ export const initiateGamification = async ({
     };
   }
 
-  // Rebuild the selected month's single summary record for each participant.
-  await GamificationUserRank.deleteMany({
-    userId: { $in: userIds },
-    year: Number(month.split("-")[0]),
-    month: Number(month.split("-")[1]),
-  });
-
-  await GamificationUserPoint.deleteMany({
-    userId: { $in: userIds },
-    eventDate: { $gte: start, $lte: end },
-  });
-
+  // Calculate first and replace only after the new ledger is ready. Existing
+  // ranks/points remain intact if source-data calculation fails midway.
   const allPoints = [];
 
   for (const participant of participants) {
@@ -749,15 +881,7 @@ export const initiateGamification = async ({
       );
 
       for (const item of dayPoints) {
-        item.eventKey = eventKey(
-          item.userId,
-          dayKey(item.eventDate),
-          item.eventType,
-          item.sourceId,
-          item.programId,
-          item.batchId,
-          item.centerId
-        );
+        item.eventKey = pointEventKey(item);
       }
 
       allPoints.push(...dayPoints);
@@ -771,26 +895,17 @@ export const initiateGamification = async ({
     );
 
     for (const item of markPoints) {
-      item.eventKey = eventKey(
-        item.userId,
-        dayKey(item.eventDate),
-        item.eventType,
-        item.sourceId,
-        item.programId,
-        item.batchId,
-        item.centerId
-      );
+      item.eventKey = pointEventKey(item);
     }
 
     allPoints.push(...markPoints);
   }
 
-  if (allPoints.length) {
-    await GamificationUserPoint.insertMany(
-      allPoints,
-      { ordered: false }
-    );
-  }
+  for (const item of allPoints) item.calculationRunId = runId;
+  await replacePointEvents(
+    { userId: { $in: userIds }, eventDate: { $gte: start, $lte: end } },
+    allPoints
+  );
 
   const rankResult = await updateMonthlyRanking({
     month,
@@ -818,36 +933,54 @@ export const initiateGamificationDaily = async ({ date, initiatedBy }) => {
   await prepareRankStorage();
   const dayStart = startOfDay(date);
   const dayEnd = endOfDay(dayStart);
-  const month = `${dayStart.getUTCFullYear()}-${String(dayStart.getUTCMonth()+1).padStart(2,"0")}`;
+  const month = `${dayStart.getUTCFullYear()}-${String(dayStart.getUTCMonth() + 1).padStart(2, "0")}`;
   const criteria = await getOrCreateCriteria();
   const participants = await GamificationParticipant.find({ isActive: true }).lean();
   const userIds = participants.map((p) => p.userId);
   if (!userIds.length) return { date: dayStart, month, totalParticipants: 0, totalPointEvents: 0, totalRanks: 0 };
 
-  // Replace only this day's generated points for these participants.
-  await GamificationUserPoint.deleteMany({ userId: { $in: userIds }, eventDate: { $gte: dayStart, $lte: dayEnd } });
-  const points = [];
+  const dailyPoints = [];
+  const monthlyMarkPoints = [];
+  const ms = monthStart(month);
+  const me = monthEnd(month);
+
   for (const participant of participants) {
     const dayPoints = await calculateParticipantDay(participant, dayStart, criteria);
-    for (const item of dayPoints) item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
-    points.push(...dayPoints);
-    const markPoints = await calculateParticipantMarks(participant, dayStart, dayEnd, criteria);
-    for (const item of markPoints) item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
-    points.push(...markPoints);
+    for (const item of dayPoints) {
+      item.eventKey = pointEventKey(item);
+    }
+    dailyPoints.push(...dayPoints);
+
+    // Marks are month/exam based, not day based. Recalculate the selected
+    // month's mark events without deleting them as part of the daily refresh.
+    const markPoints = await calculateParticipantMarks(participant, ms, me, criteria);
+    for (const item of markPoints) {
+      item.eventKey = pointEventKey(item);
+    }
+    monthlyMarkPoints.push(...markPoints);
   }
-  if (points.length) await GamificationUserPoint.insertMany(points, { ordered: false });
+
+  await replacePointEvents(
+    { userId: { $in: userIds }, eventDate: { $gte: dayStart, $lte: dayEnd }, eventType: { $ne: "Marks" } },
+    dailyPoints
+  );
+  await replacePointEvents(
+    { userId: { $in: userIds }, eventDate: { $gte: ms, $lte: me }, eventType: "Marks" },
+    monthlyMarkPoints
+  );
+
   const rankResult = await updateMonthlyRanking({ month, initiatedBy, rankingDate: dayStart });
-  return { date: dayStart, month, totalParticipants: participants.length, totalPointEvents: points.length, totalRanks: rankResult.totalRanks };
+  return { date: dayStart, month, totalParticipants: participants.length, totalPointEvents: dailyPoints.length + monthlyMarkPoints.length, totalRanks: rankResult.totalRanks };
 };
 
 
 /**
  * Rebuild one participant's point events for the activity date from persisted
- * source records. This is invoked by activity controllers after a successful
- * write; it deliberately does not calculate ranks. Rank documents remain an
- * admin-triggered operation.
+ * source records. Activity controllers call this after a successful write;
+ * after the point ledger is reconciled, the affected month's ranking snapshot
+ * is refreshed automatically.
  */
-export const syncGamificationPointsForActivity = async ({ userId, date = new Date() }) => {
+export const syncGamificationPointsForActivity = async ({ userId, date = new Date(), examId = null }) => {
   if (!userId) return { skipped: true, reason: "missing-user" };
   const dayStart = startOfDay(date);
   const dayEnd = endOfDay(dayStart);
@@ -860,24 +993,51 @@ export const syncGamificationPointsForActivity = async ({ userId, date = new Dat
   // for this user/day, preserving other dates and other users' point history.
   const dailyPoints = await calculateParticipantDay(participant, dayStart, criteria);
   for (const item of dailyPoints) {
-    item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+    item.eventKey = pointEventKey(item);
   }
-  await GamificationUserPoint.deleteMany({
-    userId,
-    eventDate: { $gte: dayStart, $lte: dayEnd },
-    eventType: { $ne: "Marks" },
-  });
-  if (dailyPoints.length) await GamificationUserPoint.insertMany(dailyPoints, { ordered: false });
+  await replacePointEvents(
+    { userId, eventDate: { $gte: dayStart, $lte: dayEnd }, eventType: { $ne: "Marks" } },
+    dailyPoints
+  );
 
-  // Marks are evaluated per exam/month, so refresh only this user's marks
-  // events for the selected month, without touching the other event types.
+  // Marks are exam-based. When an exam is edited/deleted, reconcile that
+  // exam's one stable event across all months, then refresh every affected
+  // monthly rank so an old award cannot survive a later cleanup.
   const ms = monthStart(month);
   const me = monthEnd(month);
-  const markPoints = await calculateParticipantMarks(participant, ms, me, criteria);
-  for (const item of markPoints) {
-    item.eventKey = eventKey(item.userId, dayKey(item.eventDate), item.eventType, item.sourceId, item.programId, item.batchId, item.centerId);
+  const previousExamEvents = examId
+    ? await GamificationUserPoint.find({ userId, eventType: "Marks", sourceId: examId })
+        .select("eventDate eventKey")
+        .lean()
+    : [];
+  const affectedMonths = new Set([
+    month,
+    ...previousExamEvents.map((item) => {
+      const d = new Date(item.eventDate);
+      return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    }),
+  ]);
+
+  const calculatedMarks = await calculateParticipantMarks(participant, ms, me, criteria);
+  for (const item of calculatedMarks) item.eventKey = pointEventKey(item);
+
+  let markPoints = calculatedMarks;
+  if (examId) {
+    markPoints = calculatedMarks.filter((item) => String(item.sourceId) === String(examId));
+    await replacePointEvents({ userId, eventType: "Marks", sourceId: examId }, markPoints);
+  } else {
+    await replacePointEvents(
+      { userId, eventType: "Marks", eventDate: { $gte: ms, $lte: me } },
+      markPoints
+    );
   }
-  await GamificationUserPoint.deleteMany({ userId, eventType: "Marks", eventDate: { $gte: ms, $lte: me } });
-  if (markPoints.length) await GamificationUserPoint.insertMany(markPoints, { ordered: false });
-  return { userId, date: dayStart, dailyPointEvents: dailyPoints.length, marksPointEvents: markPoints.length };
+
+  // Refresh summaries from the point ledger so the admin no longer needs to
+  // press a rank-calculation button after ordinary activity saves. If an exam
+  // was removed/changed, refresh its previous month(s) as well as this month.
+  let rankResult = null;
+  for (const affectedMonth of affectedMonths) {
+    rankResult = await updateMonthlyRanking({ month: affectedMonth, rankingDate: new Date() });
+  }
+  return { userId, date: dayStart, dailyPointEvents: dailyPoints.length, marksPointEvents: markPoints.length, rankRunId: rankResult?.runId };
 };

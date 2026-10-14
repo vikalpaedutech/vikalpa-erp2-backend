@@ -78,7 +78,7 @@ const getAllPermissions = asyncHandler(async (req, res) => {
   const pageNumber = Math.max(Number(page) || 1, 1);
   const limitNumber = Math.min(
     Math.max(Number(limit) || 20, 1),
-    100
+    1000
   );
 
   const skip = (pageNumber - 1) * limitNumber;
@@ -108,7 +108,7 @@ const getAllPermissions = asyncHandler(async (req, res) => {
 
   const [permissions, totalPermissions] = await Promise.all([
     Permission.find(filter)
-      .sort({ module: 1, action: 1 })
+      .sort({ permissionName: 1, module: 1, action: 1 })
       .skip(skip)
       .limit(limitNumber),
 
@@ -275,7 +275,7 @@ const searchPermissions = asyncHandler(async (req, res) => {
 
   const limitNumber = Math.min(
     Math.max(Number(limit) || 20, 1),
-    100
+    1000
   );
 
   if (!q.trim()) {
@@ -290,7 +290,7 @@ const searchPermissions = asyncHandler(async (req, res) => {
       { action: { $regex: q.trim(), $options: "i" } },
     ],
   })
-    .sort({ module: 1, action: 1 })
+    .sort({ permissionName: 1, module: 1, action: 1 })
     .limit(limitNumber);
 
   return res

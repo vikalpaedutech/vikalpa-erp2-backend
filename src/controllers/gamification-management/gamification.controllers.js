@@ -11,7 +11,7 @@ import { GamificationParticipant } from "../../models/gamification-management/ga
 import { GamificationCriteria } from "../../models/gamification-management/gamificationCriteria.models.js";
 import { GamificationUserPoint } from "../../models/gamification-management/gamificationUserPoints.models.js";
 import { GamificationUserRank } from "../../models/gamification-management/gamificationUserRanks.models.js";
-import { getOrCreateCriteria, initiateGamification, initiateGamificationDaily, updateMonthlyRanking, monthStart, monthEnd } from "../../services/gamification-management/gamificationCalculation.services.js";
+import { getOrCreateCriteria, initiateGamification, initiateGamificationDaily, updateMonthlyRanking, monthStart, monthEnd, startOfDay, endOfDay } from "../../services/gamification-management/gamificationCalculation.services.js";
 
 const isAdmin = async (userId) => {
   const roles = await UserRole.find({ userId, isActive: true }).populate("roleId","roleCode").lean();
@@ -231,45 +231,88 @@ export const getMyGamificationDashboard = async (
       });
     }
 
-    const participant =
-      await GamificationParticipant.findOne({
-        userId: req.user._id,
-        isActive: true,
-      }).lean();
+    const participant = await GamificationParticipant.findOne({
+      userId: req.user._id,
+      isActive: true,
+    })
+      .populate("assignments.programId", "programName programCode")
+      .populate("assignments.batchId", "batchName")
+      .populate("assignments.centerId", "centerName centerCode")
+      .lean();
 
     if (!participant) {
-      return res.json({
-        success: true,
-        data: { isParticipant: false },
-      });
+      return res.json({ success: true, data: { isParticipant: false } });
     }
 
     const now = new Date();
-    const month = `${now.getUTCFullYear()}-${String(
-      now.getUTCMonth() + 1
-    ).padStart(2, "0")}`;
-
+    const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
     const ms = monthStart(month);
     const me = monthEnd(month);
+    const todayStart = startOfDay(now);
+    const todayEnd = endOfDay(todayStart);
 
-    const [monthlyRank, points] = await Promise.all([
+    const [monthlyRank, points, assignmentPoints] = await Promise.all([
       GamificationUserRank.findOne({
         userId: req.user._id,
         year: now.getUTCFullYear(),
         month: now.getUTCMonth() + 1,
       }).lean(),
-
       GamificationUserPoint.find({
         userId: req.user._id,
-        eventDate: {
-          $gte: ms,
-          $lte: me,
-        },
+        eventDate: { $gte: ms, $lte: me },
       })
         .sort({ eventDate: -1, createdAt: -1 })
         .limit(100)
         .lean(),
+      GamificationUserPoint.find({
+        userId: req.user._id,
+        eventDate: { $gte: ms, $lte: me },
+      }).lean(),
     ]);
+
+    const classificationFor = (value) =>
+      Number(value) > 0 ? "Positive" : Number(value) < 0 ? "Negative" : "Neutral";
+    const assignmentBreakdown = (participant.assignments || []).map((assignment) => {
+      const programId = assignment.programId?._id || assignment.programId;
+      const batchId = assignment.batchId?._id || assignment.batchId;
+      const centerId = assignment.centerId?._id || assignment.centerId;
+      const scopedPoints = assignmentPoints.filter((point) =>
+        String(point.programId || "") === String(programId || "") &&
+        String(point.batchId || "") === String(batchId || "") &&
+        String(point.centerId || "") === String(centerId || "")
+      );
+      const totalPoints = scopedPoints.reduce((sum, point) => sum + Number(point.points || 0), 0);
+      const todaysPoints = scopedPoints
+        .filter((point) => new Date(point.eventDate) >= todayStart && new Date(point.eventDate) <= todayEnd)
+        .reduce((sum, point) => sum + Number(point.points || 0), 0);
+      const eventTypes = ["Student Attendance", "PDF Upload", "Calling Absentee", "Marks", "Disciplinary"];
+      const eventBreakdown = eventTypes.map((eventType) => {
+        const matching = scopedPoints.filter((point) => point.eventType === eventType);
+        return {
+          eventType,
+          totalPoint: matching.reduce((sum, point) => sum + Number(point.points || 0), 0),
+          todaysPoint: matching
+            .filter((point) => new Date(point.eventDate) >= todayStart && new Date(point.eventDate) <= todayEnd)
+            .reduce((sum, point) => sum + Number(point.points || 0), 0),
+        };
+      });
+      return {
+        assignmentId: String(assignment._id),
+        programId: String(programId || ""),
+        programName: assignment.programId?.programName || "Program",
+        programCode: assignment.programId?.programCode || "",
+        batchId: String(batchId || ""),
+        batchName: assignment.batchId?.batchName || "Batch",
+        centerId: String(centerId || ""),
+        centerName: assignment.centerId?.centerName || "Center",
+        centerCode: assignment.centerId?.centerCode || "",
+        totalPoints,
+        todayPoints: todaysPoints,
+        pointClassification: classificationFor(totalPoints),
+        todayPointClassification: classificationFor(todaysPoints),
+        eventBreakdown,
+      };
+    });
 
     return res.json({
       success: true,
@@ -278,13 +321,11 @@ export const getMyGamificationDashboard = async (
         month,
         monthlyRank,
         points,
+        assignmentBreakdown,
       },
     });
   } catch (e) {
-    return res.status(500).json({
-      success: false,
-      message: e.message,
-    });
+    return res.status(500).json({ success: false, message: e.message });
   }
 };
 

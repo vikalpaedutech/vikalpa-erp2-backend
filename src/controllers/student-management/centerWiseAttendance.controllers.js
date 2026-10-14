@@ -1100,6 +1100,11 @@ export const deleteCenterWiseAttendance =
         attendanceId
       );
 
+      await syncGamificationPointsForActivity({
+        userId: attendance.uploadedBy || userId,
+        date: attendance.date || attendance.createdAt || new Date(),
+      }).catch((error) => console.error("Gamification center attendance delete sync failed:", error));
+
       return res.status(200).json({
         success: true,
         message:

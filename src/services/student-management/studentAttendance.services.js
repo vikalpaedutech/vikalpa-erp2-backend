@@ -119,10 +119,10 @@ const markAttendance = async (attendanceData, markedBy) => {
   // ----------------------------------------------------------
 
   const startOfDay = new Date(attendanceDate);
-  startOfDay.setHours(0, 0, 0, 0);
+  startOfDay.setUTCHours(0, 0, 0, 0);
 
   const endOfDay = new Date(attendanceDate);
-  endOfDay.setHours(23, 59, 59, 999);
+  endOfDay.setUTCHours(23, 59, 59, 999);
 
   // ----------------------------------------------------------
   // If Absent:
@@ -189,6 +189,18 @@ const markAttendance = async (attendanceData, markedBy) => {
       }
     );
 
+  // Reconcile points and rankings after both creating and updating a
+  // Present attendance record. Without this sync, single-student marking
+  // would save attendance but leave the gamification ledger unchanged.
+  if (markedBy) {
+    await syncGamificationPointsForActivity({
+      userId: markedBy,
+      date: startOfDay,
+    }).catch((error) =>
+      console.error("Gamification point sync failed:", error)
+    );
+  }
+
   return {
     studentId: student._id,
     enrollmentId: enrollment._id,
@@ -250,7 +262,7 @@ const bulkMarkAttendance = async (
   }
 
   const startOfDay = new Date(attendanceDate);
-  startOfDay.setHours(0, 0, 0, 0);
+  startOfDay.setUTCHours(0, 0, 0, 0);
 
   // ----------------------------------------------------------
   // Remove duplicate enrollment IDs
@@ -420,10 +432,10 @@ const getAttendance = async (queryParams = {}) => {
   }
 
   const startOfDay = new Date(attendanceDate);
-  startOfDay.setHours(0, 0, 0, 0);
+  startOfDay.setUTCHours(0, 0, 0, 0);
 
   const endOfDay = new Date(attendanceDate);
-  endOfDay.setHours(23, 59, 59, 999);
+  endOfDay.setUTCHours(23, 59, 59, 999);
 
   // ----------------------------------------------------------
   // Validate ObjectId filters
@@ -715,7 +727,7 @@ const normalizeDate = (date) => {
     throw new ApiError(400, "Invalid date");
   }
 
-  parsedDate.setHours(0, 0, 0, 0);
+  parsedDate.setUTCHours(0, 0, 0, 0);
 
   return parsedDate;
 };
@@ -1304,10 +1316,10 @@ const getAbsenteeCallingStudents = async (queryParams, userId) => {
   }
 
   const startOfDay = new Date(attendanceDate);
-  startOfDay.setHours(0, 0, 0, 0);
+  startOfDay.setUTCHours(0, 0, 0, 0);
 
   const endOfDay = new Date(attendanceDate);
-  endOfDay.setHours(23, 59, 59, 999);
+  endOfDay.setUTCHours(23, 59, 59, 999);
 
   // ----------------------------------------------------------
   // Validate ObjectId filters
@@ -1730,7 +1742,7 @@ const saveAbsenteeCalling = async (
   const startOfDay =
     new Date(parsedDate);
 
-  startOfDay.setHours(
+  startOfDay.setUTCHours(
     0,
     0,
     0,
@@ -1740,7 +1752,7 @@ const saveAbsenteeCalling = async (
   const endOfDay =
     new Date(parsedDate);
 
-  endOfDay.setHours(
+  endOfDay.setUTCHours(
     23,
     59,
     59,

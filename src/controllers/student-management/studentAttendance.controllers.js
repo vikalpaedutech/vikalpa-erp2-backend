@@ -1,6 +1,8 @@
 import { asyncHandler } from "../../utils/async-handler.js";
 import { ApiResponse } from "../../utils/api-response.js";
 
+import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
+
 import {
   markAttendance as markAttendanceService,
   bulkMarkAttendance as bulkMarkAttendanceService,
@@ -24,6 +26,11 @@ const markAttendance = asyncHandler(async (req, res) => {
     req.user._id
   );
 
+  await syncGamificationPointsForActivity({
+    userId: req.user._id,
+    date: req.body.date || new Date(),
+  }).catch((error) => console.error("Gamification student attendance sync failed:", error));
+
   return res.status(200).json(
     new ApiResponse(
       200,
@@ -43,6 +50,11 @@ const bulkMarkAttendance = asyncHandler(async (req, res) => {
     req.body,
     req.user._id
   );
+
+  await syncGamificationPointsForActivity({
+    userId: req.user._id,
+    date: req.body.date || new Date(),
+  }).catch((error) => console.error("Gamification bulk student attendance sync failed:", error));
 
   return res.status(200).json(
     new ApiResponse(

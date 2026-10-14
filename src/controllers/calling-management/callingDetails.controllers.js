@@ -3,6 +3,8 @@ import XLSX from "xlsx";
 
 import { CallingDetails } from "../../models/calling-management/callingDetails.models.js";
 import { CallingType } from "../../models/calling-management/callingType.models.js";
+import { CallLog } from "../../models/calling-management/callLog.models.js";
+import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
 
 import { ApiError } from "../../utils/api-error.js";
 import { ApiResponse } from "../../utils/api-response.js";
@@ -3244,12 +3246,50 @@ const saveAbsenteeCalling = asyncHandler(
       });
 
     // ============================================================
+    // RESOLVE A CALLING TYPE FOR THE ABSENTEE CALL LOG
+    // ============================================================
+
+    // The dedicated Absentee Calling page previously updated only
+    // CallingDetails. It never created CallLog documents, so call history
+    // and absentee-calling gamification had no source events to process.
+    let absenteeCallingType = await CallingType.findOne({
+      $or: [
+        { callingTypeCode: "ABSENTEE_CALLING" },
+        { callingTitle: { $regex: /^absentee calling$/i } },
+      ],
+    });
+
+    if (!absenteeCallingType) {
+      try {
+        absenteeCallingType = await CallingType.create({
+          callingTitle: "Absentee Calling",
+          callingTypeCode: "ABSENTEE_CALLING",
+          callingTo: "Student",
+          description: "Daily absentee student follow-up",
+          callingStatus: ["Connected", "Not Connected"],
+          callingRemark: {
+            connected: connectedRemarks,
+            notConnected: notConnectedRemarks,
+          },
+          isActive: true,
+        });
+      } catch (error) {
+        // Handle concurrent first saves without creating duplicate types.
+        if (error?.code !== 11000) throw error;
+        absenteeCallingType = await CallingType.findOne({
+          callingTypeCode: "ABSENTEE_CALLING",
+        });
+        if (!absenteeCallingType) throw error;
+      }
+    }
+
+    // ============================================================
     // DATA
     // ============================================================
 
     const callingData = {
       callingTypeId:
-        null,
+        absenteeCallingType._id,
 
       enrollmentId:
         enrollment._id,
@@ -3365,13 +3405,34 @@ const saveAbsenteeCalling = asyncHandler(
         );
     }
 
+    // Every successful submission represents a call attempt and must have
+    // its own history record. Do not overwrite prior CallLog attempts.
+    const callLog = await CallLog.create({
+      callingTypeId: absenteeCallingType._id,
+      callingDetailId: callingDetails._id,
+      callingStatus: callingStatus.trim(),
+      remark: remark.trim(),
+      followUpDate: null,
+      comment: comment?.trim() || "",
+      calledBy: req.user._id,
+    });
+
+    // Keep gamification in sync; a sync failure must not undo the saved call.
+    await syncGamificationPointsForActivity({
+      userId: req.user._id,
+      date: new Date(),
+    }).catch((error) => {
+      console.error("Absentee calling gamification sync failed:", error);
+    });
+
     return res.status(200).json(
       new ApiResponse(
         200,
         {
           callingDetails,
+          callLog,
         },
-        "Absentee calling details saved successfully"
+        "Absentee calling details and call log saved successfully"
       )
     );
   }

@@ -534,18 +534,16 @@ export const createCenterMonitoring =
       // CHECK USER MONITORING ACCESS
       // ======================================================
 
-      const hasMonitoringAccess =
-        await getAuthorizedMonitoringCenter(
-          {
-            userId,
-            programId,
-            batchId,
-            centerId,
-          }
-        );
+      const authorizedAccess =
+        await MonitoringRegionAccess.findOne({
+          userId,
+          programId,
+          batchId,
+          centerId,
+          isActive: true,
+        }).lean();
 
-
-      if (!hasMonitoringAccess) {
+      if (!authorizedAccess) {
         return res.status(403).json({
           success: false,
           message:
@@ -553,6 +551,16 @@ export const createCenterMonitoring =
         });
       }
 
+
+      const resolvedDistrictId = authorizedAccess.districtId || districtId;
+      const resolvedBlockId = authorizedAccess.blockId || blockId;
+      if (!resolvedDistrictId || !isValidObjectId(resolvedDistrictId) ||
+          !resolvedBlockId || !isValidObjectId(resolvedBlockId)) {
+        return res.status(400).json({
+          success: false,
+          message: "The monitoring assignment is missing a valid district or block. Please update the assignment before recording monitoring.",
+        });
+      }
 
       // ======================================================
       // CHECK CENTER
@@ -583,11 +591,11 @@ export const createCenterMonitoring =
           programId,
           batchId,
 
-          districtId:
-            districtId || null,
+          // Region IDs from the active monitoring assignment are authoritative.
+          // Fall back to the request only for legacy assignments missing a region.
+          districtId: resolvedDistrictId,
 
-          blockId:
-            blockId || null,
+          blockId: resolvedBlockId,
 
           centerId,
 
@@ -899,30 +907,33 @@ export const getMonitoringCenters =
       // MAP MONITORING RECORDS
       // ======================================================
 
-      const monitoringMap =
-        new Map();
+      const monitoringMap = new Map();
+      const monitoringCountsMap = new Map();
 
+      monitoringRecords.forEach((record) => {
+        const centerId = String(record.centerId);
 
-      monitoringRecords.forEach(
-        (record) => {
-          const centerId =
-            String(
-              record.centerId
-            );
-
-
-          if (
-            !monitoringMap.has(
-              centerId
-            )
-          ) {
-            monitoringMap.set(
-              centerId,
-              record
-            );
-          }
+        // Keep the latest record for the row's current state.
+        if (!monitoringMap.has(centerId)) {
+          monitoringMap.set(centerId, record);
         }
-      );
+
+        // Counts shown beneath the discipline buttons are daily counts
+        // for this center and the selected discipline.
+        if (!monitoringCountsMap.has(centerId)) {
+          monitoringCountsMap.set(centerId, {
+            Poor: 0,
+            Average: 0,
+            Good: 0,
+            Excellent: 0,
+            "Camera Off": 0,
+          });
+        }
+        const counts = monitoringCountsMap.get(centerId);
+        if (Object.prototype.hasOwnProperty.call(counts, record.discipline)) {
+          counts[record.discipline] += 1;
+        }
+      });
 
 
       const data =
@@ -956,6 +967,15 @@ export const getMonitoringCenters =
               markedBy:
                 record?.markedBy ||
                 null,
+
+              counts:
+                monitoringCountsMap.get(center.centerId) || {
+                  Poor: 0,
+                  Average: 0,
+                  Good: 0,
+                  Excellent: 0,
+                  "Camera Off": 0,
+                },
             };
           }
         );

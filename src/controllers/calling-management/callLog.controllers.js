@@ -14,6 +14,11 @@ import { syncGamificationPointsForActivity } from "../../services/gamification-m
 
 // Create Call Log
 const createCallLog = asyncHandler(async (req, res) => {
+    const currentUser = req.user?._id || req.user?.id;
+    if (!currentUser || !mongoose.Types.ObjectId.isValid(currentUser)) {
+        throw new ApiError(401, "Authenticated user ID is missing or invalid");
+    }
+
     const {
         callingTypeId,
         callingDetailId,
@@ -94,14 +99,19 @@ const createCallLog = asyncHandler(async (req, res) => {
     }
 
 
-    if (
-        callingDetails.callingTypeId.toString() !==
-        callingTypeId.toString()
-    ) {
+    if (callingDetails.callingTypeId &&
+        callingDetails.callingTypeId.toString() !== callingTypeId.toString()) {
         throw new ApiError(
             400,
             "Calling details does not belong to this calling type"
         );
+    }
+
+    // Legacy calling details may not have a type linked yet. The explicit,
+    // validated type selected in this form becomes the association.
+    if (!callingDetails.callingTypeId) {
+        callingDetails.callingTypeId = callingTypeId;
+        await callingDetails.save();
     }
 
 
@@ -124,10 +134,10 @@ const createCallLog = asyncHandler(async (req, res) => {
                 comment?.trim() || "",
 
             calledBy:
-                req.user._id,
+                currentUser,
         });
 
-        await syncGamificationPointsForActivity({ userId: req.user?._id, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
+        await syncGamificationPointsForActivity({ userId: currentUser, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
 
 
     return res.status(201).json(
@@ -351,6 +361,10 @@ const getCallLogById = asyncHandler(async (req, res) => {
         );
     }
 
+    await syncGamificationPointsForActivity({
+        userId: callLog.calledBy,
+        date: callLog.createdAt || new Date(),
+    }).catch((error) => console.error("Gamification call-log delete sync failed:", error));
 
     return res.status(200).json(
         new ApiResponse(
@@ -694,8 +708,11 @@ const createCallAttempt = asyncHandler(async (req, res) => {
     // CHECK ASSIGNMENT
     // ============================================================
 
-    const currentUserId =
-        req.user._id.toString();
+    const currentUser = req.user?._id || req.user?.id;
+    if (!currentUser || !mongoose.Types.ObjectId.isValid(currentUser)) {
+        throw new ApiError(401, "Authenticated user ID is missing or invalid");
+    }
+    const currentUserId = currentUser.toString();
 
 
     const isAssigned =
@@ -765,10 +782,10 @@ const createCallAttempt = asyncHandler(async (req, res) => {
                 comment?.trim() || "",
 
             calledBy:
-                req.user._id,
+                currentUser,
         });
 
-        await syncGamificationPointsForActivity({ userId: req.user?._id, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
+        await syncGamificationPointsForActivity({ userId: currentUser, date: new Date() }).catch((error) => console.error("Gamification point sync failed:", error));
 
 
     // ============================================================

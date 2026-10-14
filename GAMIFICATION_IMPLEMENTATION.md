@@ -55,6 +55,8 @@ Mounted at:
 - POST `/update-ranking` body `{ month: "YYYY-MM" }`
   - Does **not** recalculate source events.
   - Rebuilds only the monthly rank summary from the existing point ledger.
+- Tracked activity writes refresh the affected user's point ledger and automatically rebuild the affected month's ranking summary.
+- Manual daily/monthly recalculation controls remain available for recovery and audit; they are not required after normal activity writes.
 - GET `/me/dashboard`
 - GET `/leaderboard`
 - GET `/report/download?month=YYYY-MM&format=xlsx|csv`
@@ -66,7 +68,7 @@ Mounted at:
 - Marks gamification groups the participant's current marks by exam.
 - If 10 students are marked first and the same exam is later completed for 30 students, the recalculation uses the current total of 30 marks and the applicable criteria range.
 - The latest marks update time is used as the marks event time and the exam's `marksUploadWithinDays` is used for deadline validation.
-- Removing a marks document removes it from the next full gamification recalculation.
+- Removing a marks document removes it from the next marks recalculation. Daily recalculation refreshes marks using the full selected month window so marks events are not accidentally deleted by a day-only rebuild.
 
 ### Other scoring rules
 
@@ -100,8 +102,9 @@ Time-based rules use `GAMIFICATION_TIMEZONE` and default to:
 
 The dashboard provides:
 - month selection
-- `Initiate / Recalculate Ranking`
-- `Update Monthly Ranking`
+- `Calculate Today's Rank` for recovery of a selected date
+- `Update Monthly Ranking` for ledger-only ranking recovery
+- Normal tracked activity writes update rankings automatically
 - Excel/CSV export
 - current-day ranking
 - monthly ranking

@@ -25,6 +25,53 @@ const requireAdmin = async (req) => {
 const validId=(id)=>mongoose.Types.ObjectId.isValid(id);
 const clean=(v)=>String(v??"").trim();
 
+// Derive current-day values from the point ledger instead of trusting a saved
+// monthly rank snapshot, which may have been generated on an earlier date.
+const getCurrentDayRanking = async (userIds, todayStart, todayEnd) => {
+  const ids = (userIds || []).filter(Boolean);
+  if (!ids.length) return new Map();
+
+  const [aggregated, attendanceRows] = await Promise.all([
+    GamificationUserPoint.aggregate([
+      { $match: { userId: { $in: ids }, eventDate: { $gte: todayStart, $lte: todayEnd } } },
+      { $group: {
+        _id: { userId: "$userId", eventType: "$eventType" },
+        points: { $sum: "$points" },
+        eventCount: { $sum: 1 },
+      } },
+    ]),
+    GamificationUserPoint.aggregate([
+      { $match: {
+        userId: { $in: ids }, eventDate: { $gte: todayStart, $lte: todayEnd },
+        eventType: "Self Attendance", eventTime: { $ne: null },
+      } },
+      { $group: { _id: "$userId", earliestAttendanceAt: { $min: "$eventTime" } } },
+    ]),
+  ]);
+
+  const rowsByUser = new Map(ids.map((id) => [String(id), {
+    userId: id, todayPoints: 0, todayEventCount: 0, eventPoints: {},
+  }]));
+  for (const item of aggregated) {
+    const row = rowsByUser.get(String(item._id.userId));
+    if (!row) continue;
+    row.todayPoints += Number(item.points || 0);
+    row.todayEventCount += Number(item.eventCount || 0);
+    row.eventPoints[item._id.eventType] = Number(item.points || 0);
+  }
+  const attendanceByUser = new Map(attendanceRows.map((item) => [String(item._id), item.earliestAttendanceAt]));
+  const sorted = [...rowsByUser.values()].sort((a, b) => {
+    if (b.todayPoints !== a.todayPoints) return b.todayPoints - a.todayPoints;
+    const aAttendance = attendanceByUser.get(String(a.userId));
+    const bAttendance = attendanceByUser.get(String(b.userId));
+    const aTime = aAttendance ? new Date(aAttendance).getTime() : Number.MAX_SAFE_INTEGER;
+    const bTime = bAttendance ? new Date(bAttendance).getTime() : Number.MAX_SAFE_INTEGER;
+    if (aTime !== bTime) return aTime - bTime;
+    return String(a.userId).localeCompare(String(b.userId));
+  });
+  return new Map(sorted.map((row, index) => [String(row.userId), { ...row, todayRank: index + 1 }]));
+};
+
 export const getGamificationRoleAccess = async (req,res)=>{
   try{
     await requireAdmin(req);
@@ -251,7 +298,7 @@ export const getMyGamificationDashboard = async (
     const todayStart = startOfDay(now);
     const todayEnd = endOfDay(todayStart);
 
-    const [monthlyRank, points, assignmentPoints] = await Promise.all([
+    const [savedMonthlyRank, points, assignmentPoints, activeParticipants] = await Promise.all([
       GamificationUserRank.findOne({
         userId: req.user._id,
         year: now.getUTCFullYear(),
@@ -268,7 +315,34 @@ export const getMyGamificationDashboard = async (
         userId: req.user._id,
         eventDate: { $gte: ms, $lte: me },
       }).lean(),
+      GamificationParticipant.find({ isActive: true }).select("userId").lean(),
     ]);
+
+    const todayRanking = await getCurrentDayRanking(
+      activeParticipants.map((item) => item.userId), todayStart, todayEnd
+    );
+    const currentDay = todayRanking.get(String(req.user._id)) || {
+      todayPoints: 0, todayEventCount: 0, todayRank: null, eventPoints: {},
+    };
+    const savedBreakdown = savedMonthlyRank?.eventBreakdown || [];
+    const eventTypes = ["Self Attendance", "Student Attendance", "PDF Upload", "Calling Absentee", "Marks", "Disciplinary"];
+    const monthlyRank = savedMonthlyRank ? {
+      ...savedMonthlyRank,
+      todayPoints: currentDay.todayPoints,
+      todayEventCount: currentDay.todayEventCount,
+      todayRank: currentDay.todayRank,
+      rankingDate: todayStart,
+      eventBreakdown: eventTypes.map((eventType) => {
+        const previous = savedBreakdown.find((item) => item.eventType === eventType);
+        const todaysPoint = Number(currentDay.eventPoints[eventType] || 0);
+        return {
+          eventType,
+          totalPoint: Number(previous?.totalPoint || 0),
+          todaysPoint,
+          pointClassification: Number(previous?.totalPoint || 0) > 0 ? "Positive" : Number(previous?.totalPoint || 0) < 0 ? "Negative" : "Neutral",
+        };
+      }),
+    } : null;
 
     const classificationFor = (value) =>
       Number(value) > 0 ? "Positive" : Number(value) < 0 ? "Negative" : "Neutral";

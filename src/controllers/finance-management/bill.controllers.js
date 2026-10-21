@@ -9,6 +9,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import { Bills } from "../../models/finance-management/bill.model.js";
+import { BillIds } from "../../models/finance-management/billIds.model.js";
 import { BillHistory } from "../../models/finance-management/billHistory.models.js";
 import { BillAuditor } from "../../models/finance-management/billAuditor.models.js";
 
@@ -1326,312 +1327,74 @@ const uploadBillAttachments =
 |--------------------------------------------------------------------------
 */
 
-export const createBill =
-  async (
-    req,
-    res
-  ) => {
-    let uploadedAttachments =
-      [];
+export const createBill = async (req, res) => {
+  let uploadedAttachments = [];
+  let createdBillIds = null;
+  const createdExpenseDocs = [];
+  try {
+    const { expensePurpose, description = "", expenses, currency = "INR", submitImmediately = "false" } = req.body;
+    const shouldSubmitImmediately = String(submitImmediately) === "true";
+    const userId = req.user?._id;
+    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    if (!expensePurpose?.trim()) return res.status(400).json({ success: false, message: "Expense purpose is required" });
+    const parsedExpenses = parseExpenses(expenses);
+    if (!parsedExpenses) return res.status(400).json({ success: false, message: "Expenses must be a valid JSON array" });
+    const validationError = validateExpenses(parsedExpenses);
+    if (validationError) return res.status(400).json({ success: false, message: validationError });
+    if ((req.files || []).length > 10) return res.status(400).json({ success: false, message: "Maximum 10 attachments are allowed across all expenses" });
 
-    try {
-      const {
-        billNumber,
-        title,
-        description,
-        billDate,
-        expenses,
-        currency,
-        vendor,
-      } = req.body;
+    createdBillIds = await BillIds.create({
+      submittedBy: userId,
+      expensePurpose: expensePurpose.trim(),
+      submissionDate: new Date(),
+      description: String(description || "").trim(),
+      currency: "INR",
+      isActive: true,
+      isPaid: false,
+    });
 
-      const userId =
-        req.user?._id;
-
-      if (!userId) {
-        return res.status(401).json({
-          success: false,
-          message:
-            "Unauthorized",
-        });
-      }
-
-      if (
-        !billNumber?.trim()
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Bill number is required",
-        });
-      }
-
-      if (
-        !title?.trim()
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Bill title is required",
-        });
-      }
-
-      if (!billDate) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Bill date is required",
-        });
-      }
-
-      const parsedExpenses =
-        parseExpenses(
-          expenses
-        );
-
-      if (!parsedExpenses) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Expenses must be a valid JSON array",
-        });
-      }
-
-      const expenseValidationError =
-        validateExpenses(
-          parsedExpenses
-        );
-
-      if (
-        expenseValidationError
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            expenseValidationError,
-        });
-      }
-
-      const totalAmount =
-        calculateTotalAmount(
-          parsedExpenses
-        );
-
-      const parsedVendor =
-        parseJsonField(
-          vendor
-        );
-
-      const existingBill =
-        await Bills.findOne({
-          billNumber:
-            billNumber.trim(),
-        });
-
-      if (existingBill) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "Bill number already exists",
-        });
-      }
-
-      const bill =
-        new Bills({
-          billNumber:
-            billNumber.trim(),
-
-          title:
-            title.trim(),
-
-          description,
-
-          billDate,
-
-          expenses:
-            parsedExpenses,
-
-          totalAmount,
-
-          currency:
-            currency ||
-            "INR",
-
-          vendor:
-            parsedVendor,
-
-          attachments: [],
-
-          submittedBy:
-            userId,
-
-          submittedAt:
-            null,
-
-          status:
-            "draft",
-        });
-
-      await bill.save();
-
-      /*
-       * Upload attachments.
-       */
-      try {
-        uploadedAttachments =
-          await uploadBillAttachments({
-            files:
-              req.files,
-
-            billId:
-              bill._id,
-          });
-      } catch (uploadError) {
-        await Bills.findByIdAndDelete(
-          bill._id
-        );
-
-        throw uploadError;
-      }
-
-      /*
-       * Save attachment metadata.
-       */
-      if (
-        uploadedAttachments.length >
-        0
-      ) {
-        bill.attachments =
-          uploadedAttachments;
-
-        await bill.save();
-      }
-
-      /*
-       * History.
-       */
-      await BillHistory.create({
-        billId:
-          bill._id,
-
-        action:
-          "created",
-
-        stage:
-          "submission",
-
-        previousStatus:
-          null,
-
-        newStatus:
-          "draft",
-
-        actionBy:
-          userId,
-
-        remarks:
-          "Bill created",
-
-        metadata: {
-          attachmentCount:
-            uploadedAttachments.length,
-        },
+    const totalAmount = calculateTotalAmount(parsedExpenses);
+    // One MongoDB Bills document per expense item, all linked to the same BillIds record.
+    for (const [expenseIndex, item] of parsedExpenses.entries()) {
+      const expenseFiles = (req.files || []).filter((file) => file.fieldname === `expenseAttachments_${expenseIndex}` || (file.fieldname === "attachments" && parsedExpenses.length === 1));
+      const itemAttachments = expenseFiles.length ? await uploadBillAttachments({ files: expenseFiles, billId: `${createdBillIds._id}/expense-${expenseIndex + 1}` }) : [];
+      uploadedAttachments.push(...itemAttachments);
+      const doc = await Bills.create({
+        // Unique compatibility identifier for legacy list/search screens; not shown in the form.
+        billNumber: `${createdBillIds._id}-${expenseIndex + 1}`,
+        title: createdBillIds.expensePurpose,
+        description: createdBillIds.description,
+        billDate: createdBillIds.submissionDate,
+        billId: createdBillIds._id,
+        expenses: [item],
+        totalAmount: Number(item.amount || 0),
+        currency: "INR",
+        vendor: {},
+        attachments: itemAttachments,
+        submittedBy: userId,
+        submittedAt: shouldSubmitImmediately ? new Date() : null,
+        status: shouldSubmitImmediately ? "verification-pending" : "draft",
+        isActive: true,
       });
-
-      const populatedBill =
-        await Bills.findById(
-          bill._id
-        )
-          .populate(
-            "submittedBy",
-            "name email"
-          )
-          .lean();
-
-      /*
-       * Generate signed URLs
-       * in response.
-       */
-      if (
-        Array.isArray(
-          populatedBill.attachments
-        )
-      ) {
-        populatedBill.attachments =
-          await Promise.all(
-            populatedBill.attachments.map(
-              async (
-                attachment
-              ) => ({
-                ...attachment,
-
-                url:
-                  await getAttachmentSignedUrl(
-                    attachment.publicId
-                  ),
-              })
-            )
-          );
-      }
-
-      return res.status(201).json({
-        success: true,
-
-        message:
-          "Bill created successfully",
-
-        data:
-          populatedBill,
-      });
-    } catch (error) {
-      console.error(
-        "CREATE BILL ERROR:",
-        error
-      );
-
-      if (
-        uploadedAttachments.length >
-        0
-      ) {
-        for (
-          const attachment of uploadedAttachments
-        ) {
-          try {
-            await deleteFromSpaces(
-              attachment.publicId
-            );
-          } catch (
-            deleteError
-          ) {
-            console.error(
-              "CREATE BILL ROLLBACK ERROR:",
-              deleteError
-            );
-          }
-        }
-      }
-
-      if (
-        error.code ===
-        11000
-      ) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "Bill number already exists",
-        });
-      }
-
-      return res.status(500).json({
-        success: false,
-        message:
-          "Failed to create bill",
-
-        error:
-          error.message,
-      });
+      createdExpenseDocs.push(doc);
+      await BillHistory.create({ billId: doc._id, action: shouldSubmitImmediately ? "submitted" : "created", stage: "submission", previousStatus: null, newStatus: shouldSubmitImmediately ? "verification-pending" : "draft", actionBy: userId, remarks: shouldSubmitImmediately ? "Expense submitted" : "Expense draft created", metadata: { billGroupId: createdBillIds._id, expenseAmount: doc.totalAmount } });
     }
-  };
+    if (shouldSubmitImmediately) {
+      await BillIds.findByIdAndUpdate(createdBillIds._id, { submissionDate: new Date() });
+    }
+    return res.status(201).json({
+      success: true,
+      message: shouldSubmitImmediately ? "Bill submitted successfully" : `Bill draft created with ${createdExpenseDocs.length} separate expense record(s)`,
+      data: { billId: createdBillIds._id, billInformation: createdBillIds, expenses: createdExpenseDocs, totalAmount, currency: "INR" },
+    });
+  } catch (error) {
+    console.error("CREATE BILL ERROR:", error);
+    if (createdExpenseDocs.length) await Bills.deleteMany({ _id: { $in: createdExpenseDocs.map(x => x._id) } }).catch(() => {});
+    if (createdBillIds?._id) await BillIds.findByIdAndDelete(createdBillIds._id).catch(() => {});
+    for (const attachment of uploadedAttachments) { try { await deleteFromSpaces(attachment.publicId); } catch (e) { console.error("CREATE BILL ROLLBACK ERROR:", e); } }
+    return res.status(500).json({ success: false, message: "Failed to create bill", error: error.message });
+  }
+};
 
 
 /*
@@ -3237,66 +3000,87 @@ export const getBillsForVerification =
         });
       }
 
-      const isAdmin =
-        await userHasRole(
-          userId,
-          "admin"
-        );
-
+      // BillAuditor is the single source of truth for verification queue access.
       const match = {
-        status:
-          "verification-pending",
+        status: "verification-pending",
       };
 
-      /*
-       * Admin:
-       * all verification-pending bills.
-       */
-      if (!isAdmin) {
-        const eligibleUserIds =
-          await getEligibleSubmitterUserIds({
-            auditorUserId:
-              userId,
+      const auditorMappings = await BillAuditor.find({
+        userId,
+        action: "verify",
+        isActive: true,
+      }).lean();
 
-            action:
-              "verify",
-          });
+      if (auditorMappings.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: "No active BillAuditor verification mapping found",
+          data: {
+            bills: [],
+            pagination: {
+              total: 0,
+              page: Number(page) || 1,
+              limit: Number(limit) || 10,
+              totalPages: 0,
+            },
+          },
+        });
+      }
 
-        if (
-          eligibleUserIds.length ===
-          0
-        ) {
+      // Role access is applied to the bill submitter's role where available.
+      // Legacy/imported bills can have missing or inactive UserRole links; do not
+      // silently hide those bills from an explicitly assigned global auditor.
+      const roleCodes = [...new Set(
+        auditorMappings.map((mapping) => String(mapping.roleAccess || "").trim().toUpperCase()).filter(Boolean)
+      )];
+      const roleAssignments = await UserRole.find({ isActive: true })
+        .populate("roleId", "roleCode isActive")
+        .lean();
+      const submitterIdsByRole = new Map();
+      for (const assignment of roleAssignments) {
+        const code = String(assignment.roleId?.roleCode || "").trim().toUpperCase();
+        if (!code || assignment.roleId?.isActive === false || !roleCodes.includes(code)) continue;
+        const key = code;
+        if (!submitterIdsByRole.has(key)) submitterIdsByRole.set(key, []);
+        submitterIdsByRole.get(key).push(String(assignment.userId));
+      }
+
+      const allowedSubmitterIds = new Set();
+      for (const mapping of auditorMappings) {
+        if (mapping.regionScope === "global") {
+          (submitterIdsByRole.get(String(mapping.roleAccess || "").trim().toUpperCase()) || [])
+            .forEach((id) => allowedSubmitterIds.add(id));
+        }
+      }
+
+      // Keep the configured role restriction when role assignments are available.
+      // For global mappings, include legacy submitters without active role links so
+      // imported historical bills are not hidden solely due to stale UserRole data.
+      const globalMapping = auditorMappings.some((mapping) => mapping.regionScope === "global");
+      if (globalMapping) {
+        const knownSubmitterIds = [...allowedSubmitterIds];
+        if (knownSubmitterIds.length > 0) {
+          match.$or = [
+            { submittedBy: { $in: knownSubmitterIds } },
+            { submittedBy: { $nin: roleAssignments.map((assignment) => assignment.userId) } },
+          ];
+        } else {
+          // A global BillAuditor assignment is explicit authorization; allow its
+          // pending queue even when legacy user-role links are unavailable.
+        }
+      } else {
+        const eligibleUserIds = await getEligibleSubmitterUserIds({
+          auditorUserId: userId,
+          action: "verify",
+        });
+        if (eligibleUserIds.length === 0) {
           return res.status(200).json({
             success: true,
-
-            message:
-              "Verification bills fetched successfully",
-
-            data: {
-              bills: [],
-
-              pagination: {
-                total: 0,
-
-                page:
-                  Number(page) ||
-                  1,
-
-                limit:
-                  Number(limit) ||
-                  10,
-
-                totalPages:
-                  0,
-              },
-            },
+            message: "No bills match the configured BillAuditor region scope",
+            data: { bills: [], pagination: { total: 0, page: Number(page) || 1, limit: Number(limit) || 10, totalPages: 0 } },
           });
         }
-
-        match.submittedBy = {
-          $in:
-            eligibleUserIds,
-        };
+        match.submittedBy = { $in: eligibleUserIds };
       }
 
       if (billNumber) {
@@ -3431,66 +3215,47 @@ export const getBillsForApproval =
         });
       }
 
-      const isAdmin =
-        await userHasRole(
-          userId,
-          "admin"
-        );
-
+      // BillAuditor is the single source of truth for approval queue access.
       const match = {
-        status:
-          "approval-pending",
+        status: "approval-pending",
       };
 
-      /*
-       * Admin:
-       * all approval-pending bills.
-       */
-      if (!isAdmin) {
-        const eligibleUserIds =
-          await getEligibleSubmitterUserIds({
-            auditorUserId:
-              userId,
+      const auditorMappings = await BillAuditor.find({
+        userId,
+        action: "approve",
+        isActive: true,
+      }).lean();
 
-            action:
-              "approve",
-          });
+      if (auditorMappings.length === 0) {
+        return res.status(200).json({
+          success: true,
+          message: "No active BillAuditor approval mapping found",
+          data: {
+            bills: [],
+            pagination: {
+              total: 0,
+              page: Number(page) || 1,
+              limit: Number(limit) || 10,
+              totalPages: 0,
+            },
+          },
+        });
+      }
 
-        if (
-          eligibleUserIds.length ===
-          0
-        ) {
+      const globalMapping = auditorMappings.some((mapping) => mapping.regionScope === "global");
+      if (!globalMapping) {
+        const eligibleUserIds = await getEligibleSubmitterUserIds({
+          auditorUserId: userId,
+          action: "approve",
+        });
+        if (eligibleUserIds.length === 0) {
           return res.status(200).json({
             success: true,
-
-            message:
-              "Approval bills fetched successfully",
-
-            data: {
-              bills: [],
-
-              pagination: {
-                total: 0,
-
-                page:
-                  Number(page) ||
-                  1,
-
-                limit:
-                  Number(limit) ||
-                  10,
-
-                totalPages:
-                  0,
-              },
-            },
+            message: "No bills match the configured BillAuditor region scope",
+            data: { bills: [], pagination: { total: 0, page: Number(page) || 1, limit: Number(limit) || 10, totalPages: 0 } },
           });
         }
-
-        match.submittedBy = {
-          $in:
-            eligibleUserIds,
-        };
+        match.submittedBy = { $in: eligibleUserIds };
       }
 
       if (billNumber) {
@@ -3628,6 +3393,28 @@ export const getBillsForApproval =
 |--------------------------------------------------------------------------
 */
 
+export const deleteBill = async (req, res) => {
+  try {
+    const { billId } = req.params;
+    const userId = req.user?._id;
+    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    const bill = await Bills.findById(billId);
+    if (!bill) return res.status(404).json({ success: false, message: "Bill not found" });
+    if (bill.submittedBy?.toString() !== userId.toString()) return res.status(403).json({ success: false, message: "You can delete only your own bill" });
+    if (!["draft", "verification-pending"].includes(bill.status)) return res.status(400).json({ success: false, message: "Only draft or verification-pending bills can be deleted" });
+    const groupId = bill.billId || bill._id;
+    const groupBills = await Bills.find({ billId: groupId, submittedBy: userId });
+    if (groupBills.some((item) => !["draft", "verification-pending"].includes(item.status))) return res.status(400).json({ success: false, message: "This bill group can no longer be deleted" });
+    await Bills.deleteMany({ billId: groupId, submittedBy: userId });
+    await BillIds.findOneAndUpdate({ _id: groupId, submittedBy: userId }, { isActive: false });
+    return res.status(200).json({ success: true, message: "Bill deleted successfully" });
+  } catch (error) {
+    console.error("DELETE BILL ERROR:", error);
+    return res.status(500).json({ success: false, message: "Failed to delete bill", error: error.message });
+  }
+};
+
+
 export const updateBill = async (
   req,
   res
@@ -3708,6 +3495,7 @@ export const updateBill = async (
       ![
         "draft",
         "rejected",
+        "verification-pending",
       ].includes(
         bill.status
       )
@@ -3715,37 +3503,14 @@ export const updateBill = async (
       return res.status(400).json({
         success: false,
         message:
-          "Only draft or rejected bills can be edited",
+          "Only draft, rejected, or verification-pending bills can be edited",
       });
     }
 
-    /*
-     * Basic validation.
-     */
-
-    if (!billNumber?.trim()) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Bill number is required",
-      });
-    }
-
-    if (!title?.trim()) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Bill title is required",
-      });
-    }
-
-    if (!billDate) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Bill date is required",
-      });
-    }
+    // The refactored form no longer sends legacy bill number/title/date fields.
+    const effectiveBillNumber = billNumber?.trim() || bill.billNumber || `${bill.billId || bill._id}`;
+    const effectiveTitle = title?.trim() || bill.title || "Expense";
+    const effectiveBillDate = billDate || bill.billDate || new Date();
 
     /*
      * Parse expenses.
@@ -3792,7 +3557,7 @@ export const updateBill = async (
     const existingBill =
       await Bills.findOne({
         billNumber:
-          billNumber.trim(),
+          effectiveBillNumber,
 
         _id: {
           $ne:
@@ -4001,16 +3766,16 @@ export const updateBill = async (
       bill.status;
 
     bill.billNumber =
-      billNumber.trim();
+      effectiveBillNumber;
 
     bill.title =
-      title.trim();
+      effectiveTitle;
 
     bill.description =
       description;
 
     bill.billDate =
-      billDate;
+      effectiveBillDate;
 
     bill.expenses =
       parsedExpenses;
@@ -4963,6 +4728,7 @@ export const getBillDashboard =
   ) => {
     try {
       const {
+        paymentStatusOnly,
         status,
         submittedByRole,
         submittedBy,
@@ -5155,7 +4921,7 @@ export const getBillDashboard =
       let visibleSubmitterIds =
         null;
 
-      if (!isAdmin) {
+      if (!isAdmin && String(paymentStatusOnly) !== "true") {
         /*
          * User can always see own bills.
          */
@@ -5198,6 +4964,12 @@ export const getBillDashboard =
        */
 
       const match = {};
+
+      // Payment Status page is intentionally global: users granted this permission
+      // can see approved/payment-pending/paid bills across all regions.
+      if (String(paymentStatusOnly) === "true") {
+        match.status = { $in: ["approved", "payment-pending", "paid"] };
+      }
 
       if (
         visibleSubmitterIds
@@ -5242,8 +5014,10 @@ export const getBillDashboard =
        * Status.
        */
       if (status) {
-        match.status =
-          status;
+        if (String(paymentStatusOnly) === "true" && !["approved", "payment-pending", "paid"].includes(status)) {
+          return res.status(400).json({ success: false, message: "Invalid payment status filter" });
+        }
+        match.status = status;
       }
 
       /*
@@ -5642,6 +5416,7 @@ export const getBillDashboard =
             "submittedBy",
             "name email"
           )
+          .populate("billId", "expensePurpose description submissionDate")
           .populate(
             "verification.verifiedBy",
             "name email"
@@ -5781,14 +5556,23 @@ export const getBillDashboard =
           .push(region);
       }
 
-      const enrichedBills =
+      const enrichedBills = await Promise.all(
         bills.map(
-          (bill) => {
+          async (bill) => {
             const submitterId =
               bill.submittedBy?._id?.toString();
 
+            const attachments = await Promise.all((bill.attachments || []).map(async (attachment) => {
+              let signedUrl = attachment.url || "";
+              try { signedUrl = await getAttachmentSignedUrl(attachment.publicId) || signedUrl; } catch (error) { console.error("Dashboard attachment signing failed", error); }
+              return { ...attachment, signedUrl };
+            }));
             return {
               ...bill,
+              attachments,
+              groupedBillId: bill.billId?._id?.toString?.() || bill.billId?.toString?.() || "",
+              expensePurpose: bill.billId?.expensePurpose || bill.title || "",
+              billDescription: bill.billId?.description || bill.description || "",
 
               submittedByRole:
                 roleMap.get(
@@ -5801,7 +5585,8 @@ export const getBillDashboard =
                 ) || [],
             };
           }
-        );
+        )
+      );
 
       /*
        * --------------------------------------------------------------
@@ -6670,6 +6455,54 @@ export const bulkRejectBills =
 |--------------------------------------------------------------------------
 */
 
+
+/*
+|--------------------------------------------------------------------------
+| BULK UPDATE PAYMENT STATUS FROM CSV CONTENT
+|--------------------------------------------------------------------------
+| Body: { csvContent, updateStatus: "payment-pending" | "paid", idType: "groupedBillId" | "billId" }
+*/
+export const bulkUpdatePaymentStatusFromCsv = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    const { csvContent, updateStatus, idType } = req.body || {};
+    if (typeof csvContent !== "string" || !csvContent.trim()) return res.status(400).json({ success: false, message: "CSV content is required" });
+    if (!["payment-pending", "paid"].includes(updateStatus)) return res.status(400).json({ success: false, message: "Status must be payment-pending or paid" });
+    if (!["groupedBillId", "billId"].includes(idType)) return res.status(400).json({ success: false, message: "Invalid ID type" });
+    const parseCsvLine = (line) => {
+      const values = []; let current = ""; let quoted = false;
+      for (let i = 0; i < line.length; i++) { const ch = line[i]; if (ch === '"' && line[i + 1] === '"' && quoted) { current += '"'; i++; } else if (ch === '"') quoted = !quoted; else if (ch === ',' && !quoted) { values.push(current.trim()); current = ""; } else current += ch; }
+      values.push(current.trim()); return values;
+    };
+    const lines = csvContent.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim());
+    if (lines.length < 2) return res.status(400).json({ success: false, message: "CSV must contain headers and at least one data row" });
+    const headers = parseCsvLine(lines[0]).map(h => h.toLowerCase().replace(/\s+/g, "").replace(/_/g, ""));
+    const idHeader = idType === "groupedBillId" ? "groupedbillid" : "billid";
+    const idIndex = headers.indexOf(idHeader); const statusIndex = headers.indexOf("status");
+    if (idIndex < 0 || statusIndex < 0) return res.status(400).json({ success: false, message: `CSV must contain ${idType === "groupedBillId" ? "Grouped Bill ID" : "Bill ID"} and Status columns` });
+    const results = [];
+    for (let i = 1; i < lines.length; i++) {
+      const row = parseCsvLine(lines[i]); const id = row[idIndex]; const rowStatus = (row[statusIndex] || updateStatus).toLowerCase().replace(/\s+/g, "-");
+      if (!id) { results.push({ row: i + 1, id: "", success: false, reason: "ID is empty" }); continue; }
+      if (!["payment-pending", "paid"].includes(rowStatus) || rowStatus !== updateStatus) { results.push({ row: i + 1, id, success: false, reason: `Status must match selected status: ${updateStatus}` }); continue; }
+      if (!mongoose.Types.ObjectId.isValid(id)) { results.push({ row: i + 1, id, success: false, reason: "Invalid ID format" }); continue; }
+      try {
+        const filter = idType === "groupedBillId" ? { billId: new mongoose.Types.ObjectId(id), status: { $in: ["approved", "payment-pending", "paid"] }, isActive: { $ne: false } } : { _id: new mongoose.Types.ObjectId(id), status: { $in: ["approved", "payment-pending", "paid"] }, isActive: { $ne: false } };
+        const update = rowStatus === "paid" ? { $set: { status: "paid", "payment.paidBy": userId, "payment.paidAt": new Date(), "payment.paymentMode": "Bulk CSV", updatedAt: new Date() } } : { $set: { status: "payment-pending", updatedAt: new Date() } };
+        const result = await Bills.updateMany(filter, update);
+        if (!result.matchedCount) results.push({ row: i + 1, id, success: false, reason: "No approved/payment-status bill matched this ID" });
+        else results.push({ row: i + 1, id, success: true, updated: result.modifiedCount ?? result.nModified ?? 0 });
+      } catch (error) { results.push({ row: i + 1, id, success: false, reason: error.message }); }
+    }
+    const failed = results.filter(item => !item.success);
+    return res.json({ success: true, message: "Bulk payment status update processed", data: { total: results.length, updated: results.filter(x => x.success).length, failed: failed.length, results } });
+  } catch (error) {
+    console.error("BULK CSV PAYMENT UPDATE ERROR", error);
+    return res.status(500).json({ success: false, message: "Failed to process CSV payment update", error: error.message });
+  }
+};
+
 export const exportBillDashboard =
   async (
     req,
@@ -6685,6 +6518,7 @@ export const exportBillDashboard =
        */
 
       const {
+        paymentStatusOnly,
         status,
         submittedByRole,
         submittedBy,
@@ -6724,11 +6558,14 @@ export const exportBillDashboard =
         );
 
       const match = {};
+      if (String(paymentStatusOnly) === "true") {
+        match.status = { $in: ["approved", "payment-pending", "paid"] };
+      }
 
       /*
        * Non-admin visibility.
        */
-      if (!isAdmin) {
+      if (!isAdmin && String(paymentStatusOnly) !== "true") {
         const visibleIds =
           new Set([
             userId.toString(),
@@ -6785,8 +6622,10 @@ export const exportBillDashboard =
        * Status.
        */
       if (status) {
-        match.status =
-          status;
+        if (String(paymentStatusOnly) === "true" && !["approved", "payment-pending", "paid"].includes(status)) {
+          return res.status(400).json({ success: false, message: "Invalid payment status filter" });
+        }
+        match.status = status;
       }
 
       /*
@@ -7219,6 +7058,7 @@ export const exportBillDashboard =
             "submittedBy",
             "name email"
           )
+          .populate("billId", "expensePurpose description submissionDate")
           .sort({
             billDate:
               -1,
@@ -7325,7 +7165,11 @@ export const exportBillDashboard =
       };
 
       const headers = [
-        "Bill Number",
+        "Grouped Bill ID",
+        "Bill ID",
+        "Expense Purpose",
+        "Bill Description",
+        "Attachments (Signed URLs)",
         "Title",
         "Submitted By",
         "Submitted By Email",
@@ -7342,9 +7186,9 @@ export const exportBillDashboard =
         "Created At",
       ];
 
-      const rows =
+      const rows = await Promise.all(
         bills.map(
-          (bill) => {
+          async (bill) => {
             const submitterId =
               bill.submittedBy?._id?.toString();
 
@@ -7353,8 +7197,15 @@ export const exportBillDashboard =
                 submitterId
               ) || [];
 
+            const attachmentUrls = await Promise.all((bill.attachments || []).map(async (attachment) => {
+              try { return await getAttachmentSignedUrl(attachment.publicId); } catch (error) { console.error("CSV attachment signing failed", error); return attachment.url || ""; }
+            }));
             return [
-              bill.billNumber,
+              bill.billId?._id?.toString?.() || bill.billId?.toString?.() || "",
+              bill._id?.toString?.() || "",
+              bill.billId?.expensePurpose || bill.title || "",
+              bill.billId?.description || bill.description || "",
+              attachmentUrls.filter(Boolean).join(" | "),
               bill.title,
               bill.submittedBy?.name,
               bill.submittedBy?.email,
@@ -7386,7 +7237,8 @@ export const exportBillDashboard =
                 : "",
             ];
           }
-        );
+        )
+      );
 
       const csv = [
         headers,

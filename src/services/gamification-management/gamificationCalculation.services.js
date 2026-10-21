@@ -187,6 +187,19 @@ const addPoint = (points, data) => {
 const assignmentMatch = (a, programId, batchId, centerId) =>
   String(a.programId)===String(programId) && String(a.batchId)===String(batchId) && String(a.centerId)===String(centerId);
 
+// Non-attendance gamification events are eligible only when the participant
+// has a Daily Attendance record with status exactly "Present" on that event day.
+const hasPresentDailyAttendance = async (userId, date) => {
+  const dayStart = startOfDay(date);
+  const dayEnd = endOfDay(dayStart);
+  return Boolean(await UserAttendance.exists({
+    userId,
+    date: { $gte: dayStart, $lte: dayEnd },
+    attendanceType: "Daily Attendance",
+    status: "Present",
+  }));
+};
+
 async function calculateParticipantDay(participant, date, criteria) {
   const points=[];
   const dayStart=startOfDay(date), dayEnd=endOfDay(date);
@@ -198,6 +211,12 @@ async function calculateParticipantDay(participant, date, criteria) {
     if (afterCutoff(userAttendance.checkIn,rule?.timeValidation || criteria.selfAttendance.find(r=>r.timeValidation)?.timeValidation)) p=Number(rule?.negativeMarkingOnBreakingTimeValidation ?? p);
     addPoint(points,{userId,eventDate:dayStart,eventType:"Self Attendance",sourceId:userAttendance._id,sourceModel:"UserAttendance",points:p,ruleId:rule?._id,eventTime:userAttendance.checkIn,description:rule?.description||"Self attendance"});
   }
+
+  // Keep existing self-attendance scoring behavior, but do not award any of
+  // the other daily activity points unless the user's Daily Attendance status
+  // is exactly Present for this date.
+  if (!(await hasPresentDailyAttendance(userId, dayStart))) return points;
+
   const assignments=participant.assignments||[];
   const seen=new Set();
   for (const a of assignments) {
@@ -444,6 +463,10 @@ const calculateParticipantMarks = async (
       ) {
         continue;
       }
+
+      // Marks are monthly/exam-based, but their event is dated by the latest
+      // submission. Require Present Daily Attendance on that same event day.
+      if (!(await hasPresentDailyAttendance(userId, latestMarkTime))) continue;
 
       const exam = latestMark.examId;
       const deadline = endOfDay(

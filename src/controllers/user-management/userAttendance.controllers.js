@@ -696,6 +696,9 @@ export const getUserAttendance = async (
 
 export const getMyUserAttendance = async (req, res) => {
   try {
+    // Always scope this endpoint to the authenticated user. Do not mutate
+    // req.query and delegate to getUserAttendance: Express 5 exposes req.query
+    // through a getter, so changes to req.query may not persist between reads.
     const userId = req.user?._id;
 
     if (!userId) {
@@ -705,17 +708,97 @@ export const getMyUserAttendance = async (req, res) => {
       });
     }
 
-    req.query.userId = String(userId);
+    const {
+      status,
+      attendanceType,
+      attendanceSource,
+      fromDate,
+      toDate,
+      page = 1,
+      limit = 100,
+    } = req.query;
 
-    return getUserAttendance(req, res);
+    // Intentionally do not accept userId from the query string here.
+    const filter = { userId };
+
+    if (status) filter.status = status;
+    if (attendanceType) filter.attendanceType = attendanceType;
+    if (attendanceSource) filter.attendanceSource = attendanceSource;
+
+    if (fromDate || toDate) {
+      const dateFilter = {};
+
+      if (fromDate) {
+        const startDate = new Date(`${fromDate}T00:00:00.000Z`);
+        if (Number.isNaN(startDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid fromDate.",
+          });
+        }
+        dateFilter.$gte = startDate;
+      }
+
+      if (toDate) {
+        const endDate = new Date(`${toDate}T23:59:59.999Z`);
+        if (Number.isNaN(endDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid toDate.",
+          });
+        }
+        dateFilter.$lte = endDate;
+      }
+
+      filter.date = dateFilter;
+    }
+
+    const pageNumber = Math.max(Number.parseInt(page, 10) || 1, 1);
+    const limitNumber = Math.min(
+      Math.max(Number.parseInt(limit, 10) || 100, 1),
+      100
+    );
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const [attendance, total] = await Promise.all([
+      UserAttendance.find(filter)
+        .populate("userId", "name email userId")
+        .populate("markedBy", "name email userId")
+        .populate("leaveId")
+        .sort({ date: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limitNumber),
+      UserAttendance.countDocuments(filter),
+    ]);
+
+    // Preserve the legacy check-in fallback used by the general endpoint.
+    attendance.forEach((record) => {
+      if (
+        record.attendanceSource === "Manual" &&
+        !record.checkIn &&
+        record.createdAt
+      ) {
+        record.checkIn = record.createdAt;
+      }
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "User attendance fetched successfully.",
+      data: attendance,
+      pagination: {
+        total,
+        page: pageNumber,
+        limit: limitNumber,
+        totalPages: Math.ceil(total / limitNumber),
+      },
+    });
   } catch (error) {
     console.error("GET MY USER ATTENDANCE ERROR:", error);
 
     return res.status(500).json({
       success: false,
-      message:
-        error.message ||
-        "Failed to fetch my attendance.",
+      message: error.message || "Failed to fetch my attendance.",
     });
   }
 };

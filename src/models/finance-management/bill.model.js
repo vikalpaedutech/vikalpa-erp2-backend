@@ -11,6 +11,9 @@ const expenseItemSchema = new Schema(
         "travel-expense",
         "orientation",
         "stationery",
+        "food",
+        "accommodation",
+        "others",
       ],
     },
 
@@ -25,10 +28,11 @@ const expenseItemSchema = new Schema(
       required: true,
     },
 
-    description: {
-      type: String,
-      trim: true,
-    },
+    description: { type: String, trim: true },
+    stayedAt: { type: String, trim: true },
+    itemName: { type: String, trim: true },
+    purpose: { type: String, trim: true },
+    expense: { type: String, trim: true },
 
     // Used for travel expenses
     travel: {
@@ -69,28 +73,19 @@ const expenseItemSchema = new Schema(
 
 const billSchema = new Schema(
   {
-    billNumber: {
-      type: String,
-      required: true,
-      unique: true,
-      trim: true,
-    },
+    billId: { type: Schema.Types.ObjectId, ref: "BillIds", index: true },
 
-    title: {
-      type: String,
-      required: true,
-      trim: true,
-    },
+    // Kept optional for backwards compatibility with legacy bills.
+    billNumber: { type: String, trim: true },
+
+    title: { type: String, trim: true },
 
     description: {
       type: String,
       trim: true,
     },
 
-    billDate: {
-      type: Date,
-      required: true,
-    },
+    billDate: { type: Date },
 
     /*
      * Multiple expense categories/items
@@ -335,9 +330,8 @@ billSchema.index({
   createdAt: -1,
 });
 
-billSchema.index({
-  billDate: -1,
-});
+billSchema.index({ billId: 1, createdAt: -1 });
+billSchema.index({ billDate: -1 });
 
 billSchema.index({
   "verification.verifiedBy": 1,

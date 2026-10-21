@@ -10,6 +10,7 @@ import {
   getBillById,
   getBillHistory,
   updateBill,
+  deleteBill,
   submitBill,
   verifyBill,
   rejectBill,
@@ -25,6 +26,7 @@ import {
 
   // Dashboard export
   exportBillDashboard,
+  bulkUpdatePaymentStatusFromCsv,
     bulkMarkPaymentPending,
   bulkMarkBillsPaid,
 } from "../../controllers/finance-management/bill.controllers.js";
@@ -44,7 +46,7 @@ router.use(verifyJWT);
 router
   .route("/")
   .post(
-    uploadFinanceAttachments.array("attachments", 10),
+    uploadFinanceAttachments.any(),
     createBill
   );
 
@@ -101,6 +103,9 @@ router
 router
   .route("/dashboard/export")
   .get(exportBillDashboard);
+
+// Process payment status bulk CSV content
+router.route("/bulk-payment-status-csv").post(bulkUpdatePaymentStatusFromCsv);
 
 // ============================================================
 // BULK WORKFLOW ACTIONS
@@ -172,11 +177,9 @@ router
   .route("/:billId")
   .get(getBillById)
   .patch(
-    uploadFinanceAttachments.array(
-      "attachments",
-      10
-    ),
+    uploadFinanceAttachments.any(),
     updateBill
-  );
+  )
+  .delete(deleteBill);
 
 export default router;

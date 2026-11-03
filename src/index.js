@@ -10,14 +10,18 @@ dotenv.config({
 
 
 
-const port = process.env.port || 8100
+//const port = process.env.port || 8100
+
+
+// DIGITAL OCEAN
+const port = process.env.PORT || 8080
 
 
 connectDb()
     .then(async()=>{
         await seedPermissions()
-        app.listen(port, ()=>{
-            console.log(`Example app is listening onport http://localhost:${port}`)
+        app.listen(port, "0.0.0.0", ()=>{
+            console.log(`Example app is listening on port ${port}`)
         })
     })
     .catch((err)=>{

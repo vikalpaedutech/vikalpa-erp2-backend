@@ -120,6 +120,7 @@ import userAttendanceRouter from "./routes/user-management/userAttendance.routes
 import gamificationRouter from "./routes/gamification-management/gamification.routes.js";
 import userPermissionRouter from "./routes/user-management/userPermission.routes.js";
 import dashboardRouter from "./routes/dashboard-management/dashboard.routes.js";
+import hrmsRouter from "./routes/hr-management/hrms.routes.js";
 
 // ============================================================
 // ROUTES
@@ -361,6 +362,11 @@ app.use(
 app.use(
   "/api/v1/dashboard-management",
   dashboardRouter
+);
+
+app.use(
+  "/api/v1/hrms",
+  hrmsRouter
 );
 
 export default app;

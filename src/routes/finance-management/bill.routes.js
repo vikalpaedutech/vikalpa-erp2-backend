@@ -5,6 +5,7 @@ import { Router } from "express";
 import {
   createBill,
   getBills,
+  exportMyBillsExcel,
   getBillsForVerification,
   getBillsForApproval,
   getBillById,
@@ -131,6 +132,9 @@ router
 // ============================================================
 // NORMAL BILLS
 // ============================================================
+
+// Export only the logged-in user's bills. Keep before /:billId.
+router.route("/export-my-bills").get(exportMyBillsExcel);
 
 // Get own bills
 router

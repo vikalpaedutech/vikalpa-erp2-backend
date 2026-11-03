@@ -16,6 +16,7 @@ const gamificationUserPointSchema = new Schema(
     batchId: { type: Schema.Types.ObjectId, ref: "Batch", default: null },
     centerId: { type: Schema.Types.ObjectId, ref: "Center", default: null },
     points: { type: Number, required: true },
+    maxPoints: { type: Number, default: 0 },
     pointClassification: { type: String, enum: ["Positive", "Neutral", "Negative"], required: true },
     ruleId: { type: Schema.Types.ObjectId, default: null },
     metricValue: { type: Number, default: null },

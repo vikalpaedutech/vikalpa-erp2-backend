@@ -30,6 +30,7 @@ const gamificationCriteriaSchema = new Schema(
     callingAbsentee: { type: [rangeRuleSchema], default: [] },
     marks: { type: [rangeRuleSchema], default: [] },
     disciplinary: { type: [rangeRuleSchema], default: [] },
+    eventPointOverrides: { type: Map, of: Number, default: {} },
     updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true }

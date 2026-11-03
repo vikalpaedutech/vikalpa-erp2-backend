@@ -10,6 +10,8 @@ import {
   updateGamificationCriteria,
   initiateGamificationCalculation,
   initiateGamificationDailyCalculation,
+  initiateGamificationEventTypeCalculation,
+  updateGamificationEventPointValue,
   updateGamificationMonthlyRanking,
   getMyGamificationDashboard,
   getGamificationLeaderboard,
@@ -35,6 +37,8 @@ router.put("/criteria", updateGamificationCriteria);
 
 router.post("/initiate", initiateGamificationCalculation);
 router.post("/initiate-daily", initiateGamificationDailyCalculation);
+router.post("/initiate-event", initiateGamificationEventTypeCalculation);
+router.patch("/event-point-value", updateGamificationEventPointValue);
 router.post("/update-ranking", updateGamificationMonthlyRanking);
 router.get("/leaderboard", getGamificationLeaderboard);
 router.get("/report/download", downloadGamificationReport);

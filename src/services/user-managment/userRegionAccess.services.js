@@ -4,6 +4,7 @@ import { UserRegionAccess } from "../../models/user-management/userRegionAccess.
 import { District } from "../../models/region-management/district.models.js";
 import { Block } from "../../models/region-management/block.models.js";
 import { Center } from "../../models/region-management/center.models.js";
+import { UserRole } from "../../models/user-management/userRole.models.js";
 import { ApiError } from "../../utils/api-error.js";
 
 /**
@@ -279,10 +280,46 @@ const getMergedUserRegionAccess = async (userId) => {
   // GET USER REGION ACCESS
   // ============================================================
 
-  const userRegionAccess =
-    await UserRegionAccess.find({
-      userId,
-    }).lean();
+  const [userRegionAccess, assignedRoles] = await Promise.all([
+    UserRegionAccess.find({ userId }).lean(),
+    UserRole.find({ userId, isActive: true }).populate({ path: "roleId", select: "roleCode roleName isActive" }).lean(),
+  ]);
+
+  // Center Coordinators must only receive explicitly assigned centers,
+  // even if a broader/global region record was accidentally assigned.
+  const isCenterCoordinator = assignedRoles.some(({ roleId }) =>
+    roleId && roleId.isActive !== false &&
+    String(roleId.roleCode || "").trim().toLowerCase() === "cc"
+  );
+
+  if (isCenterCoordinator) {
+    const centerIds = [...new Set(userRegionAccess
+      .filter((entry) => entry.scope === "center" && entry.centerId)
+      .map((entry) => String(entry.centerId)))];
+    const assignedCenters = centerIds.length
+      ? await Center.find({ _id: { $in: centerIds } }).select("_id centerCode centerName districtId blockId").lean()
+      : [];
+    const districtIds = [...new Set(assignedCenters.map((center) => String(center.districtId)).filter(Boolean))];
+    const blockIds = [...new Set(assignedCenters.map((center) => String(center.blockId)).filter(Boolean))];
+    const [districts, blocks] = await Promise.all([
+      districtIds.length ? District.find({ _id: { $in: districtIds } }).select("_id districtName").lean() : [],
+      blockIds.length ? Block.find({ _id: { $in: blockIds } }).select("_id blockName").lean() : [],
+    ]);
+    const districtMap = new Map(districts.map((item) => [String(item._id), item.districtName || ""]));
+    const blockMap = new Map(blocks.map((item) => [String(item._id), item.blockName || ""]));
+    return {
+      scope: assignedCenters.length ? ["center"] : [],
+      region: assignedCenters.map((center) => ({
+        districtId: center.districtId || null,
+        districtName: districtMap.get(String(center.districtId)) || "",
+        blockId: center.blockId || null,
+        blockName: blockMap.get(String(center.blockId)) || "",
+        centerId: center._id,
+        centerName: center.centerName || "",
+        centerCode: center.centerCode || "",
+      })),
+    };
+  }
 
   if (!userRegionAccess.length) {
     return {

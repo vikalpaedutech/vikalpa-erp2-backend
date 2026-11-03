@@ -83,6 +83,19 @@ const pointEventKey = (item) => {
  */
 const replacePointEvents = async (scope, points) => {
   const normalizedPoints = Array.isArray(points) ? points : [];
+  if (normalizedPoints.length) {
+    const criteria = await GamificationCriteria.findOne({ isActive: true }).sort({ updatedAt: -1 }).lean();
+    const overrides = criteria?.eventPointOverrides || {};
+    for (const point of normalizedPoints) {
+      const override = overrides instanceof Map ? overrides.get(point.eventType) : overrides[point.eventType];
+      if (override !== undefined && override !== null && Number.isFinite(Number(override))) {
+        point.points = Number(override);
+        point.maxPoints = Number(override);
+        point.pointClassification = classification(point.points);
+        point.description = `${point.description || point.eventType} (Admin point override)`;
+      }
+    }
+  }
   const keys = [...new Set(normalizedPoints.map((point) => point.eventKey).filter(Boolean))];
 
   if (normalizedPoints.length) {
@@ -181,7 +194,10 @@ export const getOrCreateCriteria = async () => {
 
 const addPoint = (points, data) => {
   const p = Number(data.points || 0);
-  points.push({...data, points:p, pointClassification:classification(p)});
+  const maxPoints = data.maxPoints === undefined
+    ? p
+    : Number(data.maxPoints || 0);
+  points.push({...data, points:p, maxPoints, pointClassification:classification(p)});
 };
 
 const assignmentMatch = (a, programId, batchId, centerId) =>
@@ -200,54 +216,63 @@ const hasPresentDailyAttendance = async (userId, date) => {
   }));
 };
 
-async function calculateParticipantDay(participant, date, criteria) {
+async function calculateParticipantDay(participant, date, criteria, onlyEventType = null) {
   const points=[];
   const dayStart=startOfDay(date), dayEnd=endOfDay(date);
   const userId=participant.userId;
-  const userAttendance=await UserAttendance.findOne({userId,date:{$gte:dayStart,$lte:dayEnd},attendanceType:"Daily Attendance",status:{$ne:"Leave"}}).sort({checkIn:1,createdAt:1}).lean();
+  const userAttendance = (!onlyEventType || onlyEventType === "Self Attendance")
+    ? await UserAttendance.findOne({userId,date:{$gte:dayStart,$lte:dayEnd},attendanceType:"Daily Attendance",status:{$ne:"Leave"}}).sort({checkIn:1,createdAt:1}).lean()
+    : null;
   if (userAttendance?.checkIn) {
     const rule=findTimeRule(criteria.selfAttendance,userAttendance.checkIn);
     let p=rule?.point ?? 0;
     if (afterCutoff(userAttendance.checkIn,rule?.timeValidation || criteria.selfAttendance.find(r=>r.timeValidation)?.timeValidation)) p=Number(rule?.negativeMarkingOnBreakingTimeValidation ?? p);
-    addPoint(points,{userId,eventDate:dayStart,eventType:"Self Attendance",sourceId:userAttendance._id,sourceModel:"UserAttendance",points:p,ruleId:rule?._id,eventTime:userAttendance.checkIn,description:rule?.description||"Self attendance"});
+    addPoint(points,{userId,eventDate:dayStart,eventType:"Self Attendance",sourceId:userAttendance._id,sourceModel:"UserAttendance",points:p,maxPoints:p,ruleId:rule?._id,eventTime:userAttendance.checkIn,description:rule?.description||"Self attendance"});
   }
 
   // Keep existing self-attendance scoring behavior, but do not award any of
   // the other daily activity points unless the user's Daily Attendance status
   // is exactly Present for this date.
+  if (onlyEventType === "Self Attendance") return points;
   if (!(await hasPresentDailyAttendance(userId, dayStart))) return points;
 
   const assignments=participant.assignments||[];
   const seen=new Set();
-  for (const a of assignments) {
+  const needsAssignmentEvents = !onlyEventType || ["Student Attendance", "PDF Upload", "Disciplinary"].includes(onlyEventType);
+  for (const a of (needsAssignmentEvents ? assignments : [])) {
     const k=`${a.programId}|${a.batchId}|${a.centerId}`;
     if(seen.has(k)) continue; seen.add(k);
     const enrollments=await StudentEnrollment.find({programId:a.programId,batchId:a.batchId,centerId:a.centerId,status:{$nin:["left","completed"]}}).select("_id studentId class").lean();
     const enrollmentIds=enrollments.map(x=>x._id), studentIds=enrollments.map(x=>x.studentId);
     if(!studentIds.length) continue;
-    const attendance=await StudentAttendance.find({
-      markedBy: userId,
-      date: { $gte: dayStart, $lte: dayEnd },
-      $or: [
-        { enrollmentId: { $in: enrollmentIds } },
-        { enrollmentId: null, studentId: { $in: studentIds } },
-      ],
-    }).sort({ createdAt: 1 }).lean();
-    const presentCount=attendance.filter((record)=>record.status==="Present").length;
-    const rule=findRangeRule(criteria.studentAttendance,presentCount);
-    if(rule && attendance.length) {
-      const eventTime=attendance[attendance.length-1]?.createdAt || dayStart;
-      const p=afterCutoff(new Date(eventTime),rule.timeValidation) ? Number(rule.negativeMarkingOnBreakingTimeValidation||0) : Number(rule.point||0);
-      addPoint(points,{userId,eventDate:dayStart,eventType:"Student Attendance",sourceId:attendance[0]?._id||a.centerId,sourceModel:"StudentAttendance",programId:a.programId,batchId:a.batchId,centerId:a.centerId,points:p,ruleId:rule._id,metricValue:presentCount,eventTime:new Date(eventTime),description:rule.description||`Student attendance: ${presentCount}`});
+    if (!onlyEventType || onlyEventType === "Student Attendance") {
+      const attendance=await StudentAttendance.find({
+        markedBy: userId,
+        date: { $gte: dayStart, $lte: dayEnd },
+        $or: [
+          { enrollmentId: { $in: enrollmentIds } },
+          { enrollmentId: null, studentId: { $in: studentIds } },
+        ],
+      }).sort({ createdAt: 1 }).lean();
+      const presentCount=attendance.filter((record)=>record.status==="Present").length;
+      const rule=findRangeRule(criteria.studentAttendance,presentCount);
+      if(rule && attendance.length) {
+        const eventTime=attendance[attendance.length-1]?.createdAt || dayStart;
+        const p=afterCutoff(new Date(eventTime),rule.timeValidation) ? Number(rule.negativeMarkingOnBreakingTimeValidation||0) : Number(rule.point||0);
+        addPoint(points,{userId,eventDate:dayStart,eventType:"Student Attendance",sourceId:attendance[0]?._id||a.centerId,sourceModel:"StudentAttendance",programId:a.programId,batchId:a.batchId,centerId:a.centerId,points:p,maxPoints:p,ruleId:rule._id,metricValue:presentCount,eventTime:new Date(eventTime),description:rule.description||`Student attendance: ${presentCount}`});
+      }
     }
-    const pdfs=await CenterWiseAttendance.find({uploadedBy:userId,centerId:a.centerId,batchId:a.batchId,date:{$gte:dayStart,$lte:dayEnd}}).sort({createdAt:1}).lean();
-    for(const pdf of pdfs.slice(0,1)){
+    if (!onlyEventType || onlyEventType === "PDF Upload") {
+      const pdfs=await CenterWiseAttendance.find({uploadedBy:userId,centerId:a.centerId,batchId:a.batchId,date:{$gte:dayStart,$lte:dayEnd}}).sort({createdAt:1}).lean();
+      for(const pdf of pdfs.slice(0,1)){
       const rule=criteria.pdfUpload[0];
       if(rule){
         const p=afterCutoff(new Date(pdf.createdAt),rule.timeValidation)?Number(rule.negativeMarkingOnBreakingTimeValidation||0):Number(rule.point||0);
-        addPoint(points,{userId,eventDate:dayStart,eventType:"PDF Upload",sourceId:pdf._id,sourceModel:"CenterWiseAttendance",programId:a.programId,batchId:a.batchId,centerId:a.centerId,points:p,ruleId:rule._id,eventTime:pdf.createdAt,description:rule.description||"Center attendance PDF upload"});
+        addPoint(points,{userId,eventDate:dayStart,eventType:"PDF Upload",sourceId:pdf._id,sourceModel:"CenterWiseAttendance",programId:a.programId,batchId:a.batchId,centerId:a.centerId,points:p,maxPoints:p,ruleId:rule._id,eventTime:pdf.createdAt,description:rule.description||"Center attendance PDF upload"});
       }
     }
+    }
+    if (!onlyEventType || onlyEventType === "Disciplinary") {
     const monitoring=await CenterMonitoring.find({programId:a.programId,batchId:a.batchId,centerId:a.centerId,date:{$gte:dayStart,$lte:dayEnd}}).sort({createdAt:1}).lean();
     const firstTwo = monitoring.slice(0, 2);
     const userMonitoringRecords = firstTwo.filter(
@@ -282,6 +307,7 @@ async function calculateParticipantDay(participant, date, criteria) {
           batchId: a.batchId,
           centerId: a.centerId,
           points: pointsValue,
+          maxPoints: Number(rule.point || 0) * 0.5 * userMonitoringRecords.length,
           ruleId: rule._id,
           metricValue: class9or10,
           eventTime: latest.createdAt,
@@ -289,7 +315,9 @@ async function calculateParticipantDay(participant, date, criteria) {
         });
       }
     }
+    }
   }
+  if (!onlyEventType || onlyEventType === "Calling Absentee") {
   const callLogs = await CallLog.find({
     calledBy: userId,
     createdAt: { $gte: dayStart, $lte: dayEnd },
@@ -342,12 +370,14 @@ async function calculateParticipantDay(participant, date, criteria) {
           centerId: assignment.centerId,
         } : {}),
         points: pointsValue,
+        maxPoints: pointsValue,
         ruleId: rule._id,
         metricValue: calls.length,
         eventTime: lastLog.createdAt,
         description: rule.description || `Absentee calls: ${calls.length}`,
       });
     }
+  }
   }
   return points;
 }
@@ -496,6 +526,7 @@ const calculateParticipantMarks = async (
         batchId: a.batchId,
         centerId: a.centerId,
         points: pointsValue,
+        maxPoints: pointsValue,
         ruleId: rule._id,
         metricValue,
         eventTime: latestMarkTime,
@@ -1063,4 +1094,51 @@ export const syncGamificationPointsForActivity = async ({ userId, date = new Dat
     rankResult = await updateMonthlyRanking({ month: affectedMonth, rankingDate: new Date() });
   }
   return { userId, date: dayStart, dailyPointEvents: dailyPoints.length, marksPointEvents: markPoints.length, rankRunId: rankResult?.runId };
+};
+
+
+// Rebuild only one event type for the requested daily or monthly period.
+// Other event types remain untouched in the point ledger.
+export const initiateGamificationEventType = async ({ eventType, periodType = "Daily", date, month, initiatedBy }) => {
+  await prepareRankStorage();
+  const allowed = ["Self Attendance", "Student Attendance", "PDF Upload", "Calling Absentee", "Marks", "Disciplinary"];
+  if (!allowed.includes(eventType)) throw new Error("Unsupported gamification event type.");
+  const period = String(periodType).toLowerCase() === "monthly" ? "Monthly" : "Daily";
+  const start = period === "Monthly" ? monthStart(month) : startOfDay(date);
+  const end = period === "Monthly" ? monthEnd(month) : endOfDay(start);
+  const calcEnd = end > endOfDay(new Date()) ? endOfDay(new Date()) : end;
+  const criteria = await getOrCreateCriteria();
+  const participants = await GamificationParticipant.find({ isActive: true }).lean();
+  const userIds = participants.map((p) => p.userId);
+  if (!userIds.length) return { eventType, periodType: period, totalParticipants: 0, totalPointEvents: 0, totalRanks: 0 };
+  const selected = [];
+  for (const participant of participants) {
+    if (eventType === "Marks") {
+      if (period === "Monthly") {
+        const rows = await calculateParticipantMarks(participant, start, calcEnd, criteria);
+        selected.push(...rows);
+      } else {
+        const ms = monthStart(`${start.getUTCFullYear()}-${String(start.getUTCMonth()+1).padStart(2,"0")}`);
+        const me = monthEnd(`${start.getUTCFullYear()}-${String(start.getUTCMonth()+1).padStart(2,"0")}`);
+        const rows = await calculateParticipantMarks(participant, ms, me, criteria);
+        selected.push(...rows.filter((x) => x.eventDate >= start && x.eventDate <= end));
+      }
+    } else {
+      for (let day = new Date(start); day <= calcEnd; day = new Date(day.getTime() + DAY_MS)) {
+        const rows = await calculateParticipantDay(participant, day, criteria, eventType);
+        selected.push(...rows.filter((x) => x.eventType === eventType));
+      }
+    }
+  }
+  for (const item of selected) {
+    item.eventKey = pointEventKey(item);
+    item.calculationRunId = crypto.randomUUID();
+  }
+  await replacePointEvents(
+    { userId: { $in: userIds }, eventDate: { $gte: start, $lte: end }, eventType },
+    selected
+  );
+  const monthKey = `${start.getUTCFullYear()}-${String(start.getUTCMonth()+1).padStart(2,"0")}`;
+  const rankResult = await updateMonthlyRanking({ month: monthKey, initiatedBy, rankingDate: period === "Daily" ? start : new Date() });
+  return { eventType, periodType: period, totalParticipants: participants.length, totalPointEvents: selected.length, totalRanks: rankResult.totalRanks, month: monthKey };
 };

@@ -15,6 +15,8 @@ import { BillAuditor } from "../../models/finance-management/billAuditor.models.
 
 import { UserRole } from "../../models/user-management/userRole.models.js";
 import { UserRegionAccess } from "../../models/user-management/userRegionAccess.models.js";
+import { getUserAccess } from "../../services/user-managment/authorization.services.js";
+import * as XLSX from "xlsx";
 
 import { Block } from "../../models/region-management/block.models.js";
 import { Center } from "../../models/region-management/center.models.js";
@@ -252,7 +254,8 @@ const validateExpenses = (
 
 const getAttachmentSignedUrl =
   async (
-    publicId
+    publicId,
+    expiresIn = 60 * 10
   ) => {
     if (!publicId) {
       return null;
@@ -271,8 +274,7 @@ const getAttachmentSignedUrl =
       spacesClient,
       command,
       {
-        expiresIn:
-          60 * 10,
+        expiresIn,
       }
     );
   };
@@ -328,6 +330,13 @@ const userHasRole =
       roleCode.toLowerCase()
     );
   };
+
+const userHasPermission = async (userId, permissionCode) => {
+  const access = await getUserAccess(userId);
+  return (access.permissions || []).some((permission) =>
+    String(permission.permissionCode || "").trim().toLowerCase() === permissionCode.toLowerCase()
+  );
+};
 
 
 /*
@@ -2245,24 +2254,14 @@ export const markPaymentPending =
         });
       }
 
-      const isAdmin =
-        await userHasRole(
-          userId,
-          "admin"
-        );
+      const isAdmin = await userHasRole(userId, "admin");
+      const hasPaymentStatusAccess = await userHasPermission(userId, "finance.bill-payment-status.view");
+      const isOwner = bill.submittedBy.toString() === userId.toString();
 
-      const isOwner =
-        bill.submittedBy.toString() ===
-        userId.toString();
-
-      if (
-        !isAdmin &&
-        !isOwner
-      ) {
+      if (!isAdmin && !isOwner && !hasPaymentStatusAccess) {
         return res.status(403).json({
           success: false,
-          message:
-            "You are not authorized to move this bill to payment pending",
+          message: "You are not authorized to move this bill to payment pending",
         });
       }
 
@@ -2406,25 +2405,14 @@ export const markBillPaid =
         });
       }
 
-      const isAdmin =
-        await userHasRole(
-          userId,
-          "admin"
-        );
+      const isAdmin = await userHasRole(userId, "admin");
+      const hasPaymentStatusAccess = await userHasPermission(userId, "finance.bill-payment-status.view");
+      const isOwner = bill.submittedBy.toString() === userId.toString();
 
-      const isOwner =
-        bill.submittedBy.toString() ===
-        userId.toString();
-
-      if (
-        !isAdmin &&
-        !isOwner
-      ) {
+      if (!isAdmin && !isOwner && !hasPaymentStatusAccess) {
         return res.status(403).json({
           success: false,
-
-          message:
-            "You are not authorized to mark this bill as paid",
+          message: "You are not authorized to mark this bill as paid",
         });
       }
 
@@ -2558,6 +2546,8 @@ export const getBills =
         status,
         submittedBy,
         billNumber,
+        fromDate,
+        toDate,
         page = 1,
         limit = 10,
       } = req.query;
@@ -2613,13 +2603,20 @@ export const getBills =
       }
 
       if (billNumber) {
-        match.billNumber = {
-          $regex:
-            billNumber,
-
-          $options:
-            "i",
-        };
+        match.billNumber = { $regex: billNumber, $options: "i" };
+      }
+      if (fromDate || toDate) {
+        match.createdAt = {};
+        if (fromDate) {
+          const start = new Date(`${fromDate}T00:00:00.000+05:30`);
+          if (Number.isNaN(start.getTime())) return res.status(400).json({ success: false, message: "Invalid fromDate" });
+          match.createdAt.$gte = start;
+        }
+        if (toDate) {
+          const end = new Date(`${toDate}T23:59:59.999+05:30`);
+          if (Number.isNaN(end.getTime())) return res.status(400).json({ success: false, message: "Invalid toDate" });
+          match.createdAt.$lte = end;
+        }
       }
 
       const pageNumber =
@@ -2710,6 +2707,81 @@ export const getBills =
     }
   };
 
+
+/*
+|--------------------------------------------------------------------------
+| EXPORT LOGGED-IN USER'S BILLS TO EXCEL
+|--------------------------------------------------------------------------
+*/
+export const exportMyBillsExcel = async (req, res) => {
+  try {
+    const userId = req.user?._id;
+    if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    const { fromDate, toDate } = req.query;
+    const match = { submittedBy: userId };
+    if (fromDate || toDate) {
+      match.createdAt = {};
+      if (fromDate) {
+        const start = new Date(`${fromDate}T00:00:00.000+05:30`);
+        if (Number.isNaN(start.getTime())) return res.status(400).json({ success: false, message: "Invalid fromDate" });
+        match.createdAt.$gte = start;
+      }
+      if (toDate) {
+        const end = new Date(`${toDate}T23:59:59.999+05:30`);
+        if (Number.isNaN(end.getTime())) return res.status(400).json({ success: false, message: "Invalid toDate" });
+        match.createdAt.$lte = end;
+      }
+    }
+    const bills = await Bills.find(match).populate("submittedBy", "name email").sort({ createdAt: -1 }).lean();
+    const rows = await Promise.all(bills.map(async (bill) => {
+      const attachmentLinks = await Promise.all((bill.attachments || []).map(async (attachment) => {
+        try {
+          const url = attachment.publicId ? await getAttachmentSignedUrl(attachment.publicId, 60 * 60 * 24 * 7) : attachment.url;
+          return url ? { name: attachment.fileName || "Attachment", url } : null;
+        } catch (error) {
+          console.error("Bill Excel attachment signing failed:", error);
+          return null;
+        }
+      }));
+      return {
+        "Bill Number": bill.billNumber || "",
+        "Expense Purpose": bill.title || bill.billId?.expensePurpose || "",
+        "Description": bill.description || bill.billId?.description || "",
+        "Expense Date": bill.createdAt ? new Date(bill.createdAt).toLocaleDateString("en-IN") : "",
+        "Uploaded At": bill.createdAt ? new Date(bill.createdAt).toISOString() : "",
+        "Expense Amount": Number(bill.totalAmount || 0),
+        "Currency": bill.currency || "INR",
+        "Status": bill.status || "",
+        _attachmentLinks: attachmentLinks.filter(Boolean),
+      };
+    }));
+    const maxAttachments = Math.max(0, ...rows.map((row) => row._attachmentLinks.length));
+    const exportRows = rows.map(({ _attachmentLinks, ...row }) => {
+      for (let index = 0; index < maxAttachments; index += 1) {
+        row[`Attachment ${index + 1}`] = _attachmentLinks[index]?.name || "";
+      }
+      return row;
+    });
+    const workbook = XLSX.utils.book_new();
+    const exportHeaders = ["Bill Number", "Expense Purpose", "Description", "Expense Date", "Uploaded At", "Expense Amount", "Currency", "Status", ...Array.from({ length: maxAttachments }, (_, index) => `Attachment ${index + 1}`)];
+    const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: exportHeaders });
+    // Store signed Spaces URLs as real Excel hyperlinks (not just plain text).
+    rows.forEach((row, rowIndex) => row._attachmentLinks.forEach((attachment, attachmentIndex) => {
+      const cellAddress = XLSX.utils.encode_cell({ r: rowIndex + 1, c: 8 + attachmentIndex });
+      if (worksheet[cellAddress]) {
+        worksheet[cellAddress].l = { Target: attachment.url, Tooltip: `Open ${attachment.name}` };
+      }
+    }));
+    XLSX.utils.book_append_sheet(workbook, worksheet, "My Bills");
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="my-bills-${new Date().toISOString().slice(0, 10)}.xlsx"`);
+    return res.status(200).send(buffer);
+  } catch (error) {
+    console.error("EXPORT MY BILLS ERROR:", error);
+    return res.status(500).json({ success: false, message: "Failed to export bills", error: error.message });
+  }
+};
 
 /*
 |--------------------------------------------------------------------------
@@ -4911,6 +4983,10 @@ export const getBillDashboard =
           userId,
           "admin"
         );
+      const hasPaymentStatusAccess = await userHasPermission(userId, "finance.bill-payment-status.view");
+      if (String(paymentStatusOnly) === "true" && !isAdmin && !hasPaymentStatusAccess) {
+        return res.status(403).json({ success: false, message: "You do not have access to Bill Payment Status" });
+      }
 
       /*
        * --------------------------------------------------------------
@@ -6466,6 +6542,9 @@ export const bulkUpdatePaymentStatusFromCsv = async (req, res) => {
   try {
     const userId = req.user?._id;
     if (!userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    const isAdmin = await userHasRole(userId, "admin");
+    const hasPaymentStatusAccess = await userHasPermission(userId, "finance.bill-payment-status.view");
+    if (!isAdmin && !hasPaymentStatusAccess) return res.status(403).json({ success: false, message: "You do not have permission to update payment statuses" });
     const { csvContent, updateStatus, idType } = req.body || {};
     if (typeof csvContent !== "string" || !csvContent.trim()) return res.status(400).json({ success: false, message: "CSV content is required" });
     if (!["payment-pending", "paid"].includes(updateStatus)) return res.status(400).json({ success: false, message: "Status must be payment-pending or paid" });
@@ -6556,6 +6635,10 @@ export const exportBillDashboard =
           userId,
           "admin"
         );
+      const hasPaymentStatusAccess = await userHasPermission(userId, "finance.bill-payment-status.view");
+      if (String(paymentStatusOnly) === "true" && !isAdmin && !hasPaymentStatusAccess) {
+        return res.status(403).json({ success: false, message: "You do not have access to Bill Payment Status export" });
+      }
 
       const match = {};
       if (String(paymentStatusOnly) === "true") {
@@ -7334,6 +7417,12 @@ export const bulkMarkPaymentPending = async (
       });
     }
 
+    const isAdmin = await userHasRole(userId, "admin");
+    const hasPaymentStatusAccess = await userHasPermission(userId, "finance.bill-payment-status.view");
+    if (!isAdmin && !hasPaymentStatusAccess) {
+      return res.status(403).json({ success: false, message: "You do not have permission to perform bulk payment updates" });
+    }
+
     if (
       !Array.isArray(billIds) ||
       billIds.length === 0
@@ -7531,6 +7620,12 @@ export const bulkMarkBillsPaid = async (
         success: false,
         message: "Unauthorized",
       });
+    }
+
+    const isAdmin = await userHasRole(userId, "admin");
+    const hasPaymentStatusAccess = await userHasPermission(userId, "finance.bill-payment-status.view");
+    if (!isAdmin && !hasPaymentStatusAccess) {
+      return res.status(403).json({ success: false, message: "You do not have permission to perform bulk payment updates" });
     }
 
     if (

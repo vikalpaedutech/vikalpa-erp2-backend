@@ -37,6 +37,8 @@ import {
   User,
 } from "../../models/user.models.js";
 
+import { getEffectivePermissionCodes } from "../../middlewares/permission.middlewares.js";
+
 import {
   CLASS_INTERACTION_FULL_REPORT_ROLES,
   CLASS_INTERACTION_INDIVIDUAL_REPORT_ROLES,
@@ -741,6 +743,21 @@ const getUserReportMode =
 
     }
 
+    // A directly assigned or role-inherited Class Interaction permission
+    // grants individual (region/program/batch-scoped) report access.
+    // Only the existing admin role retains full-report access.
+    const effectivePermissions =
+      await getEffectivePermissionCodes(userId);
+
+    if (
+      effectivePermissions.has("class-interaction.view")
+    ) {
+      return {
+        mode: "individual",
+        roleCodes,
+        roleNames,
+      };
+    }
 
     return {
       mode:

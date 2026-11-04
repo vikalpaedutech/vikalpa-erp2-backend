@@ -9,6 +9,7 @@ import {
 } from "../../controllers/academic-management/classInteraction.controllers.js";
 
 import { verifyJWT } from "../../middlewares/auth.middlewares.js";
+import { requirePermission } from "../../middlewares/permission.middlewares.js";
 
 
 const router = Router();
@@ -41,6 +42,7 @@ router
 router
   .route("/report")
   .get(
+    requirePermission("class-interaction.view"),
     getClassInteractionReport
   );
 
@@ -54,6 +56,7 @@ router
 router
   .route("/report/export")
   .get(
+    requirePermission("class-interaction.view"),
     exportClassInteractionReport
   );
 

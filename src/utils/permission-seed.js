@@ -12,6 +12,7 @@ const definitions = [
   ["Leave Rule Manage","leave.rule.manage","hr_management","leave_approval_rules"],
   ["Leave Balance Manage","leave.balance.manage","hr_management","leave_balance"],
 
+  ["Class Interaction View","class-interaction.view","class_interaction","view"],
   ["Dashboard View","dashboard.view","dashboard","view"],
   ["Dashboard Export","dashboard.export","dashboard","export"],
   ["Students Dashboard View","dashboard.students.view","dashboard_students","view"],
@@ -61,6 +62,7 @@ const descriptions = {
   "leave.policy.manage": "Manage leave policies and accrual rules.",
   "leave.accrual-report.view": "View leave accrual reports.",
   "attendance.manage": "Admin level access. This permission allows user to manage all users attendance, like marking present, absent etc.",
+  "class-interaction.view": "Allows the assigned role or user to access the Class Interaction report and view class interaction records.",
   "attendance.view": "User can mark their self attendance by clicking photos.",
   "attendance.access.manage": "Allowed user can access attendance of his regions’ users. Mostly given to ACI, Project Coordinator, and users who need to see users from their regions.",
   "attendance.report.view": "View your own attendance and attendance reports.",

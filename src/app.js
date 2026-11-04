@@ -32,7 +32,8 @@ app.use(cookieParser());
 app.use(cors({
     origin: [
         "http://localhost:5173",
-        "http://64.227.143.155:5173"
+        "http://64.227.143.155:5173",
+         "https://erp.buniyaadhry.com"
     ],
     credentials: true,
     methods: [

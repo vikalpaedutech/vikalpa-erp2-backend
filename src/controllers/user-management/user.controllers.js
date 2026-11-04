@@ -79,7 +79,7 @@ const getAllUsers = asyncHandler(async (req, res) => {
   } = req.query;
 
   const pageNumber = Math.max(parseInt(page) || 1, 1);
-  const limitNumber = Math.min(Math.max(parseInt(limit) || 10, 1), 100);
+  const limitNumber = Math.min(Math.max(parseInt(limit) || 10, 1), 1000);
 
   const skip = (pageNumber - 1) * limitNumber;
 

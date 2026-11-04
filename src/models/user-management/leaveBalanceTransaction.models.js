@@ -107,6 +107,13 @@ const leaveBalanceTransactionSchema = new Schema(
       index: true,
     },
 
+    accrualKey: { type: String, default: null, index: true },
+    expiryDate: { type: Date, default: null, index: true },
+    // Credit-lot accounting. Older transactions are backfilled lazily as amount minus consumption/expiry.
+    remainingAmount: { type: Number, min: 0, default: null },
+    consumedAmount: { type: Number, min: 0, default: 0 },
+    expiredAmount: { type: Number, min: 0, default: 0 },
+
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: "User",
@@ -140,6 +147,8 @@ leaveBalanceTransactionSchema.index({
   transactionType: 1,
   transactionDate: -1,
 });
+leaveBalanceTransactionSchema.index({ accrualKey: 1 }, { unique: true, sparse: true });
+leaveBalanceTransactionSchema.index({ expiryDate: 1, transactionType: 1 });
 
 export const LeaveBalanceTransaction =
   mongoose.model(

@@ -1,0 +1,13 @@
+import { Router } from "express";
+import { verifyJWT } from "../../middlewares/auth.middlewares.js";
+import { listEmployees, createEmployee, getEmployee, updateEmployee, addEmployeeDocument, addEmployeeContact, addEmploymentHistory } from "../../controllers/hr-management/hrms-core.controllers.js";
+const router = Router();
+router.use(verifyJWT);
+router.get("/employees", listEmployees);
+router.post("/employees", createEmployee);
+router.get("/employees/:id", getEmployee);
+router.patch("/employees/:id", updateEmployee);
+router.post("/employees/:id/documents", addEmployeeDocument);
+router.post("/employees/:id/contacts", addEmployeeContact);
+router.post("/employees/:id/history", addEmploymentHistory);
+export default router;

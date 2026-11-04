@@ -1,11 +1,16 @@
 import { Permission } from "../models/permissions-management/permissions.models.js";
 
 const definitions = [
-  ["All User Attendance","attendance.manage","attendance","manage"],
+  ["Employee Profile View","hr.employee.view","hr_management","employee_view"],
+  ["Bulk Attendance","attendance.bulk.manage","hr_management","bulk_attendance"],
+  ["Attendance Export","attendance.export","hr_management","attendance_export"],
+  ["Leave Policy Manage","leave.policy.manage","hr_management","leave_policies"],
+  ["Leave Accrual Report View","leave.accrual-report.view","hr_management","leave_accrual_report"],
+  ["All User Attendance","attendance.manage","hr_management","attendance_manage"],
   ["User Attendance","attendance.access.manage","attendance","access_manage"],
-  ["Leave Type Manage","leave.type.manage","leave_type","manage"],
-  ["Leave Rule Manage","leave.rule.manage","leave_rule","manage"],
-  ["Leave Balance Manage","leave.balance.manage","leave_balance","manage"],
+  ["Leave Type Manage","leave.type.manage","hr_management","leave_types"],
+  ["Leave Rule Manage","leave.rule.manage","hr_management","leave_approval_rules"],
+  ["Leave Balance Manage","leave.balance.manage","hr_management","leave_balance"],
 
   ["Dashboard View","dashboard.view","dashboard","view"],
   ["Dashboard Export","dashboard.export","dashboard","export"],
@@ -50,6 +55,11 @@ const definitions = [
 ];
 
 const descriptions = {
+  "hr.employee.view": "View employee directory and complete employee profiles.",
+  "attendance.bulk.manage": "Upload and manage employee attendance in bulk.",
+  "attendance.export": "Export employee attendance reports.",
+  "leave.policy.manage": "Manage leave policies and accrual rules.",
+  "leave.accrual-report.view": "View leave accrual reports.",
   "attendance.manage": "Admin level access. This permission allows user to manage all users attendance, like marking present, absent etc.",
   "attendance.view": "User can mark their self attendance by clicking photos.",
   "attendance.access.manage": "Allowed user can access attendance of his regions’ users. Mostly given to ACI, Project Coordinator, and users who need to see users from their regions.",

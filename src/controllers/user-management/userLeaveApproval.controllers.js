@@ -4,6 +4,7 @@ import { UserLeave } from "../../models/user-management/userLeave.models.js";
 import { UserLeaveApproval } from "../../models/user-management/userLeaveApproval.models.js";
 import { UserLeaveBalance } from "../../models/user-management/userLeaveBalance.models.js";
 import { LeaveBalanceTransaction } from "../../models/user-management/leaveBalanceTransaction.models.js";
+import { consumeLeaveCredits } from "../../services/hr-management/leaveCreditLedger.service.js";
 
 import {
   createLeaveAttendance,
@@ -529,6 +530,16 @@ export const approveLeave = async (
          * Convert pending reservation
          * into actual leave usage.
          */
+        // Consume individual credit lots in earliest-expiry-first order.
+        await consumeLeaveCredits({
+          userId: leave.userId,
+          leaveTypeId: leave.leaveTypeId,
+          leaveYear: leave.fromDate.getUTCFullYear(),
+          leaveId: leave._id,
+          amount: requestedDays,
+          session,
+        });
+
         leaveBalance.pendingBalance =
           pendingBalance -
           requestedDays;

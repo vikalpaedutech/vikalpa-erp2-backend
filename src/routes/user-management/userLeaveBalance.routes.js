@@ -5,6 +5,8 @@ import {
   getLeaveBalances,
   upsertLeaveBalance,
   bulkConfigureLeaveBalances,
+  getLeaveBalanceDirectory,
+  bulkImportLeaveBalances,
 } from "../../controllers/user-management/userLeaveBalance.controllers.js";
 
 import { verifyJWT } from "../../middlewares/auth.middlewares.js";
@@ -12,6 +14,9 @@ import { verifyJWT } from "../../middlewares/auth.middlewares.js";
 const router = Router();
 
 router.use(verifyJWT);
+
+router.get("/directory", getLeaveBalanceDirectory);
+router.post("/bulk-import", bulkImportLeaveBalances);
 
 // Employee: get own leave balances
 router.get("/my", getMyLeaveBalances);

@@ -1,4 +1,7 @@
 import { Router } from "express";
+import multer from "multer";
+import { downloadBulkAttendanceTemplate, uploadBulkAttendance } from "../../controllers/user-management/bulkAttendance.controllers.js";
+const bulkUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 import {
   createUserAttendance,
@@ -19,6 +22,8 @@ import { uploadImage } from "../../middlewares/upload.middlewares.js";
 const router = Router();
 
 router.use(verifyJWT);
+router.get("/bulk/template", downloadBulkAttendanceTemplate);
+router.post("/bulk", bulkUpload.single("file"), uploadBulkAttendance);
 
 // ============================================================
 // CREATE ATTENDANCE

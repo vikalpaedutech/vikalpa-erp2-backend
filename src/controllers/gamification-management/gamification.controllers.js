@@ -6,8 +6,11 @@ import { UserRole } from "../../models/user-management/userRole.models.js";
 import { Program } from "../../models/program-management/prgroam.models.js";
 import { Batch } from "../../models/program-management/batch.models.js";
 import { Center } from "../../models/region-management/center.models.js";
+import { Block } from "../../models/region-management/block.models.js";
+import { District } from "../../models/region-management/district.models.js";
 import { UserRegionAccess } from "../../models/user-management/userRegionAccess.models.js";
 import { StudentEnrollment } from "../../models/student-management/studentEnrollment.models.js";
+import { UserAttendance } from "../../models/user-management/userAttendance.models.js";
 import { getEffectivePermissionCodes } from "../../middlewares/permission.middlewares.js";
 import { GamificationRoleAccess } from "../../models/gamification-management/gamificationRoleAccess.models.js";
 import { GamificationParticipant } from "../../models/gamification-management/gamificationParticipant.models.js";
@@ -431,70 +434,186 @@ export const getMyGamificationDashboard = async (
   }
 };
 
+const GAMIFICATION_RANKING_EVENTS = [
+  { type: "Self Attendance", column: "Self Attendance", criteriaKey: "selfAttendance" },
+  { type: "Student Attendance", column: "Student Attendance", criteriaKey: "studentAttendance" },
+  { type: "PDF Upload", column: "PDF Upload", criteriaKey: "pdfUpload" },
+  { type: "Calling Absentee", column: "Absentee Calling", criteriaKey: "callingAbsentee" },
+  { type: "Marks", column: "Marks", criteriaKey: "marks" },
+  { type: "Disciplinary", column: "Disciplinary", criteriaKey: "disciplinary" },
+];
+
+const detailedRankingRows = async ({
+  participants,
+  periodType,
+  startDate,
+  endDate,
+  rankingDate,
+  rankByUser = new Map(),
+}) => {
+  const userIds = participants.map((item) => item.userId?._id || item.userId).filter(Boolean);
+  if (!userIds.length) return [];
+
+  const [pointTotals, roleRows, enrollmentCounts] = await Promise.all([
+    GamificationUserPoint.aggregate([
+      { $match: { userId: { $in: userIds }, eventDate: { $gte: startDate, $lte: endDate } } },
+      { $group: {
+        _id: { userId: "$userId", eventType: "$eventType" },
+        points: { $sum: "$points" },
+        eventCount: { $sum: 1 },
+      } },
+    ]),
+    UserRole.find({ userId: { $in: userIds }, isActive: true })
+      .populate("roleId", "roleName roleCode")
+      .lean(),
+    (async () => {
+      const clauses = [];
+      for (const participant of participants) {
+        for (const assignment of participant.assignments || []) {
+          const programId = assignment.programId?._id || assignment.programId;
+          const batchId = assignment.batchId?._id || assignment.batchId;
+          const centerId = assignment.centerId?._id || assignment.centerId;
+          if (programId && batchId && centerId) clauses.push({ programId, batchId, centerId });
+        }
+      }
+      const unique = [...new Map(clauses.map((item) => [
+        `${item.programId}|${item.batchId}|${item.centerId}`, item,
+      ])).values()];
+      if (!unique.length) return new Map();
+      const counts = await StudentEnrollment.aggregate([
+        { $match: { status: "active", $or: unique } },
+        { $group: {
+          _id: { programId: "$programId", batchId: "$batchId", centerId: "$centerId" },
+          total: { $sum: 1 },
+        } },
+      ]);
+      return new Map(counts.map((item) => [
+        `${item._id.programId}|${item._id.batchId}|${item._id.centerId}`,
+        Number(item.total || 0),
+      ]));
+    })(),
+  ]);
+
+  const pointsByUser = new Map(userIds.map((id) => [String(id), {}]));
+  const eventCountsByUser = new Map(userIds.map((id) => [String(id), 0]));
+  for (const item of pointTotals) {
+    const userKey = String(item._id.userId);
+    const eventMap = pointsByUser.get(userKey);
+    if (eventMap) eventMap[item._id.eventType] = Number(item.points || 0);
+    eventCountsByUser.set(userKey, (eventCountsByUser.get(userKey) || 0) + Number(item.eventCount || 0));
+  }
+  const rolesByUser = new Map();
+  for (const row of roleRows) {
+    const key = String(row.userId);
+    const label = row.roleId?.roleName || row.roleId?.roleCode;
+    if (!label) continue;
+    if (!rolesByUser.has(key)) rolesByUser.set(key, []);
+    rolesByUser.get(key).push(label);
+  }
+
+  const rows = participants.map((participant) => {
+    const user = participant.userId || {};
+    const userId = String(user._id || participant.userId);
+    const assignments = participant.assignments || [];
+    const districts = new Set();
+    const blocks = new Set();
+    const centers = new Set();
+    let totalStudentCount = 0;
+
+    for (const assignment of assignments) {
+      const center = assignment.centerId || {};
+      const block = center.blockId || {};
+      const district = center.districtId || {};
+      if (district.districtName) districts.add(district.districtName);
+      if (block.blockName) blocks.add(block.blockName);
+      if (center.centerName) centers.add(center.centerName);
+      const key = `${assignment.programId?._id || assignment.programId}|${assignment.batchId?._id || assignment.batchId}|${center._id || assignment.centerId}`;
+      totalStudentCount += enrollmentCounts.get(key) || 0;
+    }
+
+    const eventPoints = pointsByUser.get(userId) || {};
+    const totalPoints = GAMIFICATION_RANKING_EVENTS.reduce((sum, event) => sum + Number(eventPoints[event.type] || 0), 0);
+    const savedRank = rankByUser.get(userId) || {};
+    return {
+      userId: { _id: user._id || participant.userId, userId: user.userId || "", name: user.name || "", email: user.email || "" },
+      rank: Number(savedRank.rank || 0),
+      role: [...new Set(rolesByUser.get(userId) || [])].join(", ") || "-",
+      district: [...districts].join(", ") || "-",
+      block: [...blocks].join(", ") || "-",
+      center: [...centers].join(", ") || "-",
+      date: periodType === "Daily" ? rankingDate : `${String(startDate.getUTCFullYear())}-${String(startDate.getUTCMonth() + 1).padStart(2, "0")}`,
+      totalStudentCount,
+      selfAttendance: Number(eventPoints["Self Attendance"] || 0),
+      studentAttendance: Number(eventPoints["Student Attendance"] || 0),
+      pdfUpload: Number(eventPoints["PDF Upload"] || 0),
+      absenteeCalling: Number(eventPoints["Calling Absentee"] || 0),
+      marks: Number(eventPoints.Marks || 0),
+      disciplinary: Number(eventPoints.Disciplinary || 0),
+      totalPoints,
+      eventCount: eventCountsByUser.get(userId) || 0,
+      pointClassification: totalPoints > 0 ? "Positive" : totalPoints < 0 ? "Negative" : "Neutral",
+    };
+  });
+
+  rows.sort((a, b) => {
+    if (periodType === "Monthly" && a.rank && b.rank && a.rank !== b.rank) return a.rank - b.rank;
+    return b.totalPoints - a.totalPoints || String(a.userId?._id || "").localeCompare(String(b.userId?._id || ""));
+  });
+  rows.forEach((row, index) => { row.rank = index + 1; });
+  return rows;
+};
+
+const populateGamificationParticipants = (query) => query
+  .populate("userId", "userId name email")
+  .populate({
+    path: "assignments.centerId",
+    select: "centerName districtId blockId",
+    populate: [
+      { path: "districtId", model: "District", select: "districtName" },
+      { path: "blockId", model: "Block", select: "blockName" },
+    ],
+  })
+  .lean();
+
 export const getGamificationLeaderboard = async (req, res) => {
   try {
     const scope = clean(req.query.scope) === "all" ? "all" : "region";
     const allowedUserIds = await resolveDashboardUserIds(req, scope);
     const now = new Date();
-    const month = clean(req.query.month) || `${now.getUTCFullYear()}-${String(now.getUTCMonth()+1).padStart(2,"0")}`;
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return res.status(400).json({ success:false, message:"month must be YYYY-MM." });
-    const requestedType = String(req.query.periodType || "Monthly") === "Daily" ? "Daily" : "Monthly";
-
-    if (requestedType === "Daily") {
-      const date = clean(req.query.date) || new Date().toISOString().slice(0,10);
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ success:false, message:"date must be YYYY-MM-DD." });
-      const dayStart = startOfDay(date), dayEnd = endOfDay(dayStart);
-      const participantFilter = { isActive: true };
-      if (Array.isArray(allowedUserIds)) participantFilter.userId = { $in: allowedUserIds };
-      const participants = await GamificationParticipant.find(participantFilter).select("userId").lean();
-      const userIds = participants.map((x) => x.userId);
-      const aggregated = userIds.length ? await GamificationUserPoint.aggregate([
-        { $match: { userId: { $in: userIds }, eventDate: { $gte: dayStart, $lte: dayEnd }, ...(clean(req.query.eventType) ? { eventType: clean(req.query.eventType) } : {}) } },
-        { $group: { _id: "$userId", totalPoints: { $sum: "$points" }, eventCount: { $sum: 1 } } },
-      ]) : [];
-      const byUser = new Map(aggregated.map((x) => [String(x._id), x]));
-      const users = await User.find({ _id: { $in: userIds } }).select("userId name email").lean();
-      const userById = new Map(users.map((x) => [String(x._id), x]));
-      const rows = participants.map((participant) => {
-        const aggregate = byUser.get(String(participant.userId)) || {};
-        const totalPoints = Number(aggregate.totalPoints || 0);
-        return { userId: userById.get(String(participant.userId)) || null, totalPoints, todayPoints: totalPoints, eventCount: Number(aggregate.eventCount || 0), todayEventCount: Number(aggregate.eventCount || 0), pointClassification: totalPoints > 0 ? "Positive" : totalPoints < 0 ? "Negative" : "Neutral" };
-      }).sort((a,b) => b.totalPoints-a.totalPoints || String(a.userId?._id || "").localeCompare(String(b.userId?._id || "")));
-      const rankingRows = rows.map((row,index) => ({ ...row, rank:index+1, todayRank:index+1 }));
-      return res.json({ success:true, data:rankingRows, month, date, periodType:"Daily", eventType:clean(req.query.eventType) || null });
+    const month = clean(req.query.month) || `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return res.status(400).json({ success: false, message: "month must be YYYY-MM." });
+    const periodType = String(req.query.periodType || "Monthly") === "Daily" ? "Daily" : "Monthly";
+    const year = Number(month.slice(0, 4));
+    const monthNumber = Number(month.slice(5, 7));
+    const requestedDate = clean(req.query.date) || new Date().toISOString().slice(0, 10);
+    if (periodType === "Daily" && (!/^\d{4}-\d{2}-\d{2}$/.test(requestedDate) || Number.isNaN(new Date(`${requestedDate}T00:00:00.000Z`).getTime()))) {
+      return res.status(400).json({ success: false, message: "date must be YYYY-MM-DD." });
     }
+    const startDate = periodType === "Daily" ? startOfDay(requestedDate) : monthStart(month);
+    const endDate = periodType === "Daily" ? endOfDay(startDate) : monthEnd(month);
+    const rankingDate = periodType === "Daily" ? startDate.toISOString().slice(0, 10) : month;
 
-    const selectedEventType = clean(req.query.eventType);
-    if (selectedEventType) {
-      const ms = monthStart(month), me = monthEnd(month);
-      const participantFilter = { isActive: true };
-      if (Array.isArray(allowedUserIds)) participantFilter.userId = { $in: allowedUserIds };
-      const participants = await GamificationParticipant.find(participantFilter).select("userId").lean();
-      const userIds = participants.map((x) => x.userId);
-      const aggregated = userIds.length ? await GamificationUserPoint.aggregate([
-        { $match: { userId: { $in: userIds }, eventDate: { $gte: ms, $lte: me }, eventType: selectedEventType } },
-        { $group: { _id: "$userId", totalPoints: { $sum: "$points" }, eventCount: { $sum: 1 } } },
-      ]) : [];
-      const byUser = new Map(aggregated.map((x) => [String(x._id), x]));
-      const users = await User.find({ _id: { $in: userIds } }).select("userId name email").lean();
-      const userById = new Map(users.map((x) => [String(x._id), x]));
-      const rankingRows = participants.map((participant) => {
-        const row = byUser.get(String(participant.userId)) || {};
-        const totalPoints = Number(row.totalPoints || 0);
-        return { userId: userById.get(String(participant.userId)) || null, totalPoints, eventCount: Number(row.eventCount || 0), pointClassification: totalPoints > 0 ? "Positive" : totalPoints < 0 ? "Negative" : "Neutral" };
-      }).sort((a,b) => b.totalPoints-a.totalPoints || String(a.userId?._id || "").localeCompare(String(b.userId?._id || "")))
-        .map((row,index) => ({ ...row, rank:index+1 }));
-      return res.json({ success:true, data:rankingRows, month, periodType:"Monthly", eventType:selectedEventType });
-    }
-
-    const rankFilter = { year:Number(month.split("-")[0]), month:Number(month.split("-")[1]) };
+    const participantFilter = { isActive: true };
+    if (Array.isArray(allowedUserIds)) participantFilter.userId = { $in: allowedUserIds };
+    const participants = await populateGamificationParticipants(GamificationParticipant.find(participantFilter));
+    const rankFilter = { year, month: monthNumber };
     if (Array.isArray(allowedUserIds)) rankFilter.userId = { $in: allowedUserIds };
-    const rows = await GamificationUserRank.find(rankFilter).populate("userId","userId name email").lean();
-    const rankingRows = rows.map((row) => ({ ...row, rank:row.monthRank, totalPoints:row.totalPoints, eventCount:row.eventCount }))
-      .sort((a,b) => Number(a.rank)-Number(b.rank));
-    return res.json({ success:true, data:rankingRows, month, date:null, periodType:"Monthly" });
-  } catch (e) {
-    return res.status(e.statusCode || 500).json({ success:false, message:e.message });
+    const savedRanks = periodType === "Monthly"
+      ? await GamificationUserRank.find(rankFilter).lean()
+      : [];
+    const rankByUser = new Map(savedRanks.map((row) => [String(row.userId), { rank: row.monthRank }]));
+
+    const data = await detailedRankingRows({
+      participants,
+      periodType,
+      startDate,
+      endDate,
+      rankingDate,
+      rankByUser,
+    });
+    return res.json({ success: true, data, month, date: periodType === "Daily" ? rankingDate : null, periodType });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 };
 
@@ -532,6 +651,53 @@ const getGamificationPointMaximum = (point, criteria) => {
   return Number(point.points || 0) < ruleMaximum ? Number(point.points || 0) : ruleMaximum;
 };
 
+const buildCriteriaExportRows = (criteria) => {
+  const rows = [];
+  const sections = [
+    ["Self Attendance", "selfAttendance"],
+    ["Student Attendance", "studentAttendance"],
+    ["PDF Upload", "pdfUpload"],
+    ["Absentee Calling", "callingAbsentee"],
+    ["Marks", "marks"],
+    ["Disciplinary", "disciplinary"],
+  ];
+  for (const [label, key] of sections) {
+    const rules = Array.isArray(criteria?.[key]) ? criteria[key] : [];
+    for (const [index, rule] of rules.entries()) {
+      rows.push({
+        Category: label,
+        "Rule #": index + 1,
+        "Start Time": rule.startTime || "",
+        "End Time": rule.endTime || "",
+        "Start Range": rule.startRange ?? "",
+        "End Range": rule.endRange ?? "",
+        Points: rule.point ?? "",
+        "Validation Time": rule.timeValidation || "",
+        "Negative Points": rule.negativeMarkingOnBreakingTimeValidation ?? "",
+        Description: rule.description || "",
+      });
+    }
+  }
+  const overrides = criteria?.eventPointOverrides instanceof Map
+    ? Object.fromEntries(criteria.eventPointOverrides.entries())
+    : (criteria?.eventPointOverrides || {});
+  for (const [eventType, pointValue] of Object.entries(overrides)) {
+    rows.push({
+      Category: "Admin Point Override",
+      "Rule #": "",
+      "Start Time": "",
+      "End Time": "",
+      "Start Range": "",
+      "End Range": "",
+      Points: pointValue,
+      "Validation Time": "",
+      "Negative Points": "",
+      Description: `${eventType} override`,
+    });
+  }
+  return rows;
+};
+
 export const downloadGamificationReport = async (req, res) => {
   try {
     const scope = clean(req.query.scope) === "all" ? "all" : "region";
@@ -545,8 +711,7 @@ export const downloadGamificationReport = async (req, res) => {
     }
 
     const now = new Date();
-    const month = clean(req.query.month)
-      || `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const month = clean(req.query.month) || `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) {
       return res.status(400).json({ success: false, message: "month must be YYYY-MM." });
     }
@@ -555,218 +720,78 @@ export const downloadGamificationReport = async (req, res) => {
       return res.status(400).json({ success: false, message: "format must be xlsx or csv." });
     }
 
-    const ms = monthStart(month);
-    const me = monthEnd(month);
     const year = Number(month.slice(0, 4));
     const monthNumber = Number(month.slice(5, 7));
-
-    const participantFilter = { isActive: true };
-    const pointFilter = { eventDate: { $gte: ms, $lte: me } };
-    const rankFilter = { year, month: monthNumber };
-    if (Array.isArray(allowedUserIds)) {
-      participantFilter.userId = { $in: allowedUserIds };
-      pointFilter.userId = { $in: allowedUserIds };
-      rankFilter.userId = { $in: allowedUserIds };
+    const monthStartDate = monthStart(month);
+    const monthEndDate = monthEnd(month);
+    const date = clean(req.query.date) || new Date().toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(new Date(`${date}T00:00:00.000Z`).getTime())) {
+      return res.status(400).json({ success: false, message: "date must be YYYY-MM-DD." });
     }
+    const participantFilter = { isActive: true };
+    if (Array.isArray(allowedUserIds)) participantFilter.userId = { $in: allowedUserIds };
+    const participants = await populateGamificationParticipants(GamificationParticipant.find(participantFilter));
 
-    const [participants, points, ranks, criteria] = await Promise.all([
-      GamificationParticipant.find(participantFilter)
-        .populate("userId", "userId name email")
-        .populate("assignments.programId", "programName")
-        .populate("assignments.batchId", "batchName")
-        .populate("assignments.centerId", "centerName")
-        .lean(),
-      GamificationUserPoint.find(pointFilter)
-        .populate("userId", "userId name email")
-        .populate("programId", "programName")
-        .populate("batchId", "batchName")
-        .populate("centerId", "centerName")
-        .sort({ eventDate: 1, eventTime: 1 })
-        .lean(),
+    const rankFilter = { year, month: monthNumber };
+    if (Array.isArray(allowedUserIds)) rankFilter.userId = { $in: allowedUserIds };
+    const [ranks, criteria] = await Promise.all([
       GamificationUserRank.find(rankFilter).lean(),
       getOrCreateCriteria(),
     ]);
+    const rankByUser = new Map(ranks.map((row) => [String(row.userId), { rank: row.monthRank }]));
+    const [dayRows, monthRows] = await Promise.all([
+      detailedRankingRows({
+        participants,
+        periodType: "Daily",
+        startDate: startOfDay(date),
+        endDate: endOfDay(startOfDay(date)),
+        rankingDate: date,
+      }),
+      detailedRankingRows({
+        participants,
+        periodType: "Monthly",
+        startDate: monthStartDate,
+        endDate: monthEndDate,
+        rankingDate: month,
+        rankByUser,
+      }),
+    ]);
 
-    const participantById = new Map(
-      participants.filter((p) => p.userId?._id).map((p) => [String(p.userId._id), p])
-    );
-    const participantIds = [...participantById.keys()];
-    const assignmentClauses = [];
-    for (const participant of participants) {
-      for (const assignment of participant.assignments || []) {
-        if (assignment.programId?._id && assignment.batchId?._id && assignment.centerId?._id) {
-          assignmentClauses.push({
-            programId: assignment.programId._id,
-            batchId: assignment.batchId._id,
-            centerId: assignment.centerId._id,
-          });
-        }
-      }
-    }
-    const uniqueAssignmentClauses = [...new Map(
-      assignmentClauses.map((item) => [`${item.programId}|${item.batchId}|${item.centerId}`, item])
-    ).values()];
-    const enrollmentCounts = uniqueAssignmentClauses.length
-      ? await StudentEnrollment.aggregate([
-          { $match: { status: { $nin: ["left", "completed"] }, $or: uniqueAssignmentClauses } },
-          { $group: { _id: { programId: "$programId", batchId: "$batchId", centerId: "$centerId" }, total: { $sum: 1 } } },
-        ])
-      : [];
-    const countByAssignment = new Map(enrollmentCounts.map((item) => [
-      `${item._id.programId}|${item._id.batchId}|${item._id.centerId}`,
-      Number(item.total || 0),
-    ]));
-
-    const monthlyRankByUser = new Map(ranks.map((row) => [String(row.userId), Number(row.monthRank || row.rank || 0)]));
-    const monthlyPointsByUser = new Map();
-    const dailyPointsByUserDate = new Map();
-    const reportGroups = new Map();
-
-    for (const point of points) {
-      const userId = String(point.userId?._id || point.userId || "");
-      if (!userId || !participantById.has(userId)) continue;
-      const date = new Date(point.eventDate).toISOString().slice(0, 10);
-      const eventConfig = GAMIFICATION_REPORT_EVENTS.find((event) => event.type === point.eventType);
-      const maximum = getGamificationPointMaximum(point, criteria);
-      const earned = Number(point.points || 0);
-
-      monthlyPointsByUser.set(userId, (monthlyPointsByUser.get(userId) || 0) + earned);
-      const dailyKey = `${date}|${userId}`;
-      dailyPointsByUserDate.set(dailyKey, (dailyPointsByUserDate.get(dailyKey) || 0) + earned);
-
-      const groupKey = `${date}|${userId}`;
-      if (!reportGroups.has(groupKey)) {
-        reportGroups.set(groupKey, {
-          date,
-          userId,
-          user: point.userId,
-          earned: {},
-          maximum: {},
-        });
-      }
-      const group = reportGroups.get(groupKey);
-      if (eventConfig) {
-        group.earned[eventConfig.type] = (group.earned[eventConfig.type] || 0) + earned;
-        group.maximum[eventConfig.type] = (group.maximum[eventConfig.type] || 0) + maximum;
-      }
-    }
-
-    // Monthly rank fallback keeps the export useful before the rank snapshot is refreshed.
-    const computedMonthlyRanks = [...participantIds]
-      .sort((a, b) => (monthlyPointsByUser.get(b) || 0) - (monthlyPointsByUser.get(a) || 0) || a.localeCompare(b));
-    computedMonthlyRanks.forEach((id, index) => {
-      if (!monthlyRankByUser.get(id)) monthlyRankByUser.set(id, index + 1);
-    });
-
-    const dailyRankByUserDate = new Map();
-    const dailyDates = [...new Set([...dailyPointsByUserDate.keys()].map((key) => key.split("|")[0]))];
-    for (const date of dailyDates) {
-      const ranked = participantIds
-        .map((id) => ({ id, points: dailyPointsByUserDate.get(`${date}|${id}`) || 0 }))
-        .sort((a, b) => b.points - a.points || a.id.localeCompare(b.id));
-      ranked.forEach((item, index) => dailyRankByUserDate.set(`${date}|${item.id}`, index + 1));
-    }
-
-    const reportRows = [...reportGroups.values()].map((group) => {
-      const participant = participantById.get(group.userId);
-      const assignments = participant?.assignments || [];
-      const centerBatch = [];
-      let totalStudentCount = 0;
-      for (const assignment of assignments) {
-        const center = assignment.centerId?.centerName || "Center";
-        const batch = assignment.batchId?.batchName || "Batch";
-        const key = `${assignment.programId?._id || assignment.programId}|${assignment.batchId?._id || assignment.batchId}|${assignment.centerId?._id || assignment.centerId}`;
-        const count = countByAssignment.get(key) || 0;
-        totalStudentCount += count;
-        centerBatch.push(`${center} - ${batch}`);
-      }
-
-      const row = {
-        "S.NO": 0,
-        Participant: group.user?.name || participant?.userId?.name || "",
-        "Center batch": [...new Set(centerBatch)].join(", "),
-        Date: group.date,
-        "Total Student Count": totalStudentCount,
-      };
-      for (const event of GAMIFICATION_REPORT_EVENTS) {
-        row[event.earned] = Number(group.earned[event.type] || 0);
-        row[event.max] = Number(group.maximum[event.type] || 0);
-      }
-      row["Today Rank"] = dailyRankByUserDate.get(`${group.date}|${group.userId}`) || "";
-      row["Monthly Rank"] = monthlyRankByUser.get(group.userId) || "";
-      return row;
-    }).sort((a, b) => String(a.Date).localeCompare(String(b.Date)) || Number(a["Today Rank"] || 999999) - Number(b["Today Rank"] || 999999));
-
-    reportRows.forEach((row, index) => { row["S.NO"] = index + 1; });
-
-    const reportHeaders = [
-      "S.NO", "Participant", "Center batch", "Date", "Total Student Count",
-      "Self-Attendance", "Max Points - Self-Attendance",
-      "Student Attendance", "Max Points - Student Attendance",
-      "PDF Upload", "Max Points - PDF Upload",
-      "Absentee Calling", "Max Points - Absentee Calling",
-      "Marks", "Max Points - Marks",
-      "Disciplinary", "Max Points - Disciplinary",
-      "Today Rank", "Monthly Rank",
+    const headers = [
+      "Rank", "Participant", "Role", "District", "Block", "Center", "Date",
+      "Total Student", "Self Attendance", "Student Attendance", "PDF Upload",
+      "Absentee Calling", "Marks", "Disciplinary",
     ];
-
-    const monthlyRows = ranks.map((row) => {
-      const participant = participantById.get(String(row.userId));
-      return {
-        Rank: row.monthRank,
-        TodayRank: row.todayRank,
-        UserId: participant?.userId?.userId || "",
-        Name: participant?.userId?.name || "",
-        TotalPoints: row.totalPoints,
-        TodayPoints: row.todayPoints,
-        PositivePoints: row.positivePoints,
-        NegativePoints: row.negativePoints,
-        Events: row.eventCount,
-        Classification: row.pointClassification,
-      };
-    });
-
-    const reportDate = clean(req.query.date) || new Date().toISOString().slice(0, 10);
-    const dailyRows = [...dailyPointsByUserDate.entries()]
-      .filter(([key]) => key.startsWith(`${reportDate}|`))
-      .map(([key, totalPoints]) => {
-        const [, userId] = key.split("|");
-        const participant = participantById.get(userId);
-        return {
-          Date: reportDate,
-          Rank: dailyRankByUserDate.get(key) || "",
-          UserId: participant?.userId?.userId || "",
-          Name: participant?.userId?.name || "",
-          TodayPoints: totalPoints,
-        };
-      });
-
-    const pointRows = points.map((point) => ({
-      Date: new Date(point.eventDate).toISOString().slice(0, 10),
-      UserId: point.userId?.userId || "",
-      Name: point.userId?.name || "",
-      EventType: point.eventType,
-      Points: point.points,
-      MaxPoints: getGamificationPointMaximum(point, criteria),
-      Classification: point.pointClassification,
-      Metric: point.metricValue ?? "",
-      Program: point.programId?.programName || "",
-      Batch: point.batchId?.batchName || "",
-      Center: point.centerId?.centerName || "",
-      Description: point.description || "",
+    const toSheetRows = (rows) => rows.map((row) => ({
+      Rank: row.rank,
+      Participant: row.userId?.name || "",
+      Role: row.role,
+      District: row.district,
+      Block: row.block,
+      Center: row.center,
+      Date: row.date,
+      "Total Student": row.totalStudentCount,
+      "Self Attendance": row.selfAttendance,
+      "Student Attendance": row.studentAttendance,
+      "PDF Upload": row.pdfUpload,
+      "Absentee Calling": row.absenteeCalling,
+      Marks: row.marks,
+      Disciplinary: row.disciplinary,
     }));
 
     const workbook = XLSX.utils.book_new();
-    const dailyPerformanceSheet = XLSX.utils.json_to_sheet(reportRows, { header: reportHeaders });
-    XLSX.utils.book_append_sheet(workbook, dailyPerformanceSheet, "Daily Performance");
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(monthlyRows), "Monthly Ranking");
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(dailyRows), "Current Day Ranking");
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(pointRows), "Point Ledger");
+    const daySheet = XLSX.utils.json_to_sheet(toSheetRows(dayRows), { header: headers });
+    const monthSheet = XLSX.utils.json_to_sheet(toSheetRows(monthRows), { header: headers });
+    const criteriaSheet = XLSX.utils.json_to_sheet(buildCriteriaExportRows(criteria), {
+      header: ["Category", "Rule #", "Start Time", "End Time", "Start Range", "End Range", "Points", "Validation Time", "Negative Points", "Description"],
+    });
+    XLSX.utils.book_append_sheet(workbook, daySheet, "Day Ranking");
+    XLSX.utils.book_append_sheet(workbook, monthSheet, "Monthly Ranking");
+    XLSX.utils.book_append_sheet(workbook, criteriaSheet, "Criteria");
 
     const buffer = format === "csv"
-      ? XLSX.write(workbook, { type: "buffer", bookType: "csv", sheet: "Daily Performance" })
+      ? XLSX.write(workbook, { type: "buffer", bookType: "csv", sheet: "Day Ranking" })
       : XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
-
     res.setHeader(
       "Content-Type",
       format === "csv" ? "text/csv" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"

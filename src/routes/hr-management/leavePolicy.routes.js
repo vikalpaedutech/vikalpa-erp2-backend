@@ -1,0 +1,10 @@
+import { Router } from "express";
+import { verifyJWT } from "../../middlewares/auth.middlewares.js";
+import { listLeavePolicies, createLeavePolicy, updateLeavePolicy, runLeavePolicyAccrual } from "../../controllers/hr-management/leavePolicy.controllers.js";
+const router = Router();
+router.use(verifyJWT);
+router.get("/", listLeavePolicies);
+router.post("/", createLeavePolicy);
+router.patch("/:id", updateLeavePolicy);
+router.post("/accrual/run", runLeavePolicyAccrual);
+export default router;

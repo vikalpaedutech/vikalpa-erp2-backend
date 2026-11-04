@@ -8,7 +8,7 @@ import cookieParser from "cookie-parser";
 //To recieve json data
 
 app.use(express.json({
-    limit: "16kb"
+    limit: "5mb"
 }));
 
 
@@ -16,7 +16,7 @@ app.use(express.json({
 
 app.use(express.urlencoded({
     extended: true,
-    limit: "16kb"
+    limit: "5mb"
 }));
 
 
@@ -108,6 +108,7 @@ import monitoringRegionAccessRouter from "./routes/academic-management/monitorin
 import centerMonitoringRouter from "./routes/academic-management/centerMonitoring.routes.js";
 
 import leaveTypeRouter from "./routes/user-management/leaveType.routes.js";
+import leavePolicyRouter from "./routes/user-management/leavePolicy.routes.js";
 
 
 
@@ -312,6 +313,11 @@ app.use(
 app.use(
   "/api/v1/user-management/leave-types",
   leaveTypeRouter
+);
+
+app.use(
+  "/api/v1/user-management/leave-policies",
+  leavePolicyRouter
 );
 
 

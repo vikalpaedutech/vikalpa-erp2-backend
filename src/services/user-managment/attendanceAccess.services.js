@@ -1048,9 +1048,6 @@ export const getAccessBasedAttendance = async ({
         select:
           "name email",
       })
-      .populate({
-        path: "leaveId",
-      })
       .sort({
         date: -1,
         createdAt: -1,

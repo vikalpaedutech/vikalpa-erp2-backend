@@ -6,6 +6,8 @@ import { Role } from "../../models/permissions-management/role.models.js";
 import { LeaveType } from "../../models/hr-management/leaveType.models.js";
 import { UserLeaveBalance } from "../../models/user-management/userLeaveBalance.models.js";
 import { LeaveBalanceTransaction } from "../../models/user-management/leaveBalanceTransaction.models.js";
+import { UserDesignation } from "../../models/user-management/userDesignation.models.js";
+import { Designation } from "../../models/program-management/designation.models.js";
 
 const isAdminUser = async (userId) => {
   const userRoleRecords = await UserRole.find({
@@ -397,6 +399,7 @@ export const upsertLeaveBalance = async (req, res) => {
       carryForwardBalance = 0,
       adjustmentBalance = 0,
       expiredBalance = 0,
+      openingBalanceExpiryDate = null,
       isActive = true,
     } = req.body;
 
@@ -444,6 +447,12 @@ export const upsertLeaveBalance = async (req, res) => {
       expiredBalance,
       "expiredBalance"
     );
+    const openingExpiry = openingBalanceExpiryDate
+      ? new Date(openingBalanceExpiryDate)
+      : null;
+    if (openingBalanceExpiryDate && Number.isNaN(openingExpiry.getTime())) {
+      return res.status(400).json({ success: false, message: "Invalid opening balance expiry date." });
+    }
 
     const user = await User.findOne({
       _id: userId,
@@ -542,30 +551,23 @@ export const upsertLeaveBalance = async (req, res) => {
 
         created = true;
 
-        transaction = await LeaveBalanceTransaction.create(
-          [
-            {
-              userId,
-              leaveTypeId,
-              leaveBalanceId: balance._id,
-              leaveId: null,
-              leaveYear: year,
-              transactionType: "Opening Balance",
-              amount: newAvailable,
-              balanceBefore: 0,
-              balanceAfter: newAvailable,
-              referenceType: "Manual",
-              referenceId: balance._id,
-              reason: "Initial leave balance configured by Admin.",
-              remarks: null,
-              transactionDate: new Date(),
-              createdBy: adminId,
-            },
-          ],
-          { session }
-        );
-
-        transaction = transaction[0];
+        const initialLots = [
+          { transactionType: "Opening Balance", amount: opening, expiryDate: openingExpiry, reason: "Initial opening balance configured by Admin." },
+          { transactionType: "Accrual", amount: accrued, expiryDate: null, reason: "Initial accrued balance configured by Admin." },
+          { transactionType: "Carry Forward", amount: carryForward, expiryDate: null, reason: "Initial carry-forward balance configured by Admin." },
+          ...(adjustment > 0 ? [{ transactionType: "Manual Adjustment", amount: adjustment, expiryDate: null, reason: "Initial positive adjustment configured by Admin." }] : []),
+        ].filter((lot) => lot.amount > 0);
+        const createdLots = initialLots.length
+          ? await LeaveBalanceTransaction.create(initialLots.map((lot) => ({
+              userId, leaveTypeId, leaveBalanceId: balance._id, leaveId: null, leaveYear: year,
+              transactionType: lot.transactionType, amount: lot.amount, remainingAmount: lot.amount,
+              consumedAmount: 0, expiredAmount: 0, expiryDate: lot.expiryDate,
+              balanceBefore: 0, balanceAfter: newAvailable, referenceType: "Manual",
+              referenceId: balance._id, reason: lot.reason, remarks: null,
+              transactionDate: new Date(), createdBy: adminId,
+            })), { session })
+          : [];
+        transaction = createdLots[0] || null;
       } else {
         balance.openingBalance = opening;
         balance.accruedBalance = accrued;
@@ -591,6 +593,9 @@ export const upsertLeaveBalance = async (req, res) => {
                 amount: Math.abs(
                   newAvailable - oldAvailable
                 ),
+                remainingAmount: newAvailable > oldAvailable ? newAvailable - oldAvailable : 0,
+                consumedAmount: 0,
+                expiredAmount: 0,
                 balanceBefore: oldAvailable,
                 balanceAfter: newAvailable,
                 referenceType: "Manual",
@@ -665,6 +670,7 @@ export const bulkConfigureLeaveBalances = async (
       carryForwardBalance = 0,
       adjustmentBalance = 0,
       expiredBalance = 0,
+      openingBalanceExpiryDate = null,
       userIds = [],
     } = req.body;
 
@@ -727,6 +733,12 @@ export const bulkConfigureLeaveBalances = async (
       expiredBalance,
       "expiredBalance"
     );
+    const openingExpiry = openingBalanceExpiryDate
+      ? new Date(openingBalanceExpiryDate)
+      : null;
+    if (openingBalanceExpiryDate && Number.isNaN(openingExpiry.getTime())) {
+      return res.status(400).json({ success: false, message: "Invalid opening balance expiry date." });
+    }
 
     const leaveType = await LeaveType.findOne({
       _id: leaveTypeId,
@@ -822,29 +834,22 @@ export const bulkConfigureLeaveBalances = async (
 
           await balance.save({ session });
 
-          await LeaveBalanceTransaction.create(
-            [
-              {
-                userId: user._id,
-                leaveTypeId,
-                leaveBalanceId: balance._id,
-                leaveId: null,
-                leaveYear: year,
-                transactionType: "Opening Balance",
-                amount: newAvailable,
-                balanceBefore: 0,
-                balanceAfter: newAvailable,
-                referenceType: "Manual",
-                referenceId: balance._id,
-                reason:
-                  "Initial leave balance configured by Admin.",
-                remarks: null,
-                transactionDate: new Date(),
-                createdBy: adminId,
-              },
-            ],
-            { session }
-          );
+          const initialLots = [
+            { transactionType: "Opening Balance", amount: opening, expiryDate: openingExpiry, reason: "Initial opening balance configured by Admin." },
+            { transactionType: "Accrual", amount: accrued, expiryDate: null, reason: "Initial accrued balance configured by Admin." },
+            { transactionType: "Carry Forward", amount: carryForward, expiryDate: null, reason: "Initial carry-forward balance configured by Admin." },
+            ...(adjustment > 0 ? [{ transactionType: "Manual Adjustment", amount: adjustment, expiryDate: null, reason: "Initial positive adjustment configured by Admin." }] : []),
+          ].filter((lot) => lot.amount > 0);
+          if (initialLots.length) {
+            await LeaveBalanceTransaction.create(initialLots.map((lot) => ({
+              userId: user._id, leaveTypeId, leaveBalanceId: balance._id, leaveId: null, leaveYear: year,
+              transactionType: lot.transactionType, amount: lot.amount, remainingAmount: lot.amount,
+              consumedAmount: 0, expiredAmount: 0, expiryDate: lot.expiryDate,
+              balanceBefore: 0, balanceAfter: newAvailable, referenceType: "Manual",
+              referenceId: balance._id, reason: lot.reason, remarks: null,
+              transactionDate: new Date(), createdBy: adminId,
+            })), { session });
+          }
 
           createdCount += 1;
         } else {
@@ -876,6 +881,9 @@ export const bulkConfigureLeaveBalances = async (
                   amount: Math.abs(
                     newAvailable - oldAvailable
                   ),
+                  remainingAmount: newAvailable > oldAvailable ? newAvailable - oldAvailable : 0,
+                  consumedAmount: 0,
+                  expiredAmount: 0,
                   balanceBefore: oldAvailable,
                   balanceAfter: newAvailable,
                   referenceType: "Manual",
@@ -922,6 +930,166 @@ export const bulkConfigureLeaveBalances = async (
     await session.endSession();
   }
 };
+
+
+// ============================================================
+// LEAVE BALANCE DIRECTORY - ALL ACTIVE EMPLOYEES + FILTER OPTIONS
+// ============================================================
+export const getLeaveBalanceDirectory = async (req, res) => {
+  try {
+    await validateAdmin(req);
+    const { roleId, designationId, leaveYear, leaveTypeId } = req.query;
+    const userFilter = { isActive: true };
+
+    if (roleId) {
+      if (!mongoose.Types.ObjectId.isValid(roleId)) {
+        return res.status(400).json({ success: false, message: "Invalid roleId." });
+      }
+      const assignments = await UserRole.find({ roleId, isActive: true }).select("userId").lean();
+      userFilter._id = { $in: assignments.map((x) => x.userId) };
+    }
+    if (designationId) {
+      if (!mongoose.Types.ObjectId.isValid(designationId)) {
+        return res.status(400).json({ success: false, message: "Invalid designationId." });
+      }
+      const assignments = await UserDesignation.find({ designationId, isActive: true }).select("userId").lean();
+      const ids = assignments.map((x) => String(x.userId));
+      const existing = userFilter._id?.$in;
+      userFilter._id = { $in: existing ? existing.filter((id) => ids.includes(String(id))) : assignments.map((x) => x.userId) };
+    }
+
+    const [users, roles, designations, balances] = await Promise.all([
+      User.find(userFilter).select("_id userId name email contact").sort({ name: 1 }).lean(),
+      Role.find({ isActive: true }).select("_id roleName roleCode").sort({ roleName: 1 }).lean(),
+      Designation.find({ isActive: true }).select("_id designation designationCode").sort({ designation: 1 }).lean(),
+      UserLeaveBalance.find({
+        ...(leaveYear !== undefined ? { leaveYear: ensureValidYear(leaveYear) } : {}),
+        ...(leaveTypeId && mongoose.Types.ObjectId.isValid(leaveTypeId) ? { leaveTypeId } : {}),
+        isActive: true,
+      }).lean(),
+    ]);
+
+    const userIds = users.map((u) => u._id);
+    const [userRoles, userDesignations] = await Promise.all([
+      UserRole.find({ userId: { $in: userIds }, isActive: true }).populate("roleId", "roleName roleCode").lean(),
+      UserDesignation.find({ userId: { $in: userIds }, isActive: true }).populate("designationId", "designation designationCode").lean(),
+    ]);
+    const rolesByUser = new Map();
+    userRoles.forEach((item) => {
+      if (!item.roleId) return;
+      const key = String(item.userId);
+      if (!rolesByUser.has(key)) rolesByUser.set(key, []);
+      rolesByUser.get(key).push(item.roleId);
+    });
+    const designationByUser = new Map();
+    userDesignations.forEach((item) => {
+      if (!item.designationId) return;
+      const key = String(item.userId);
+      if (!designationByUser.has(key) || item.isPrimary) designationByUser.set(key, item.designationId);
+    });
+    const balanceMap = new Map(balances.map((b) => [`${b.userId}:${b.leaveTypeId}`, b]));
+    return res.status(200).json({
+      success: true,
+      data: {
+        roles,
+        designations,
+        employees: users.map((user) => {
+          const balance = leaveTypeId ? balanceMap.get(`${user._id}:${leaveTypeId}`) : null;
+          const designation = designationByUser.get(String(user._id));
+          return {
+            ...user,
+            roles: rolesByUser.get(String(user._id)) || [],
+            designation: designation || null,
+            balance: balance || null,
+          };
+        }),
+      },
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message || "Failed to load leave balance directory." });
+  }
+};
+
+// ============================================================
+// BULK IMPORT ROW-WISE LEAVE BALANCES
+// ============================================================
+export const bulkImportLeaveBalances = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const adminId = await validateAdmin(req);
+    const { leaveTypeId, rows } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(leaveTypeId) || !Array.isArray(rows) || !rows.length) {
+      return res.status(400).json({ success: false, message: "Valid leave type and non-empty rows are required." });
+    }
+    const leaveType = await LeaveType.findOne({ _id: leaveTypeId, isActive: true });
+    if (!leaveType) return res.status(404).json({ success: false, message: "Active leave type not found." });
+
+    let createdCount = 0;
+    let updatedCount = 0;
+    const rowErrors = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index];
+      try {
+        const userId = String(row.userId || "").trim();
+        if (!mongoose.Types.ObjectId.isValid(userId)) throw new Error("Invalid userId.");
+        const user = await User.findOne({ _id: userId, isActive: true }).select("_id");
+        if (!user) throw new Error("Active employee not found.");
+        const year = ensureValidYear(row.leaveYear);
+        const opening = toNonNegativeNumber(row.openingBalance, "openingBalance");
+        const accrued = toNonNegativeNumber(row.accruedBalance, "accruedBalance");
+        const carryForward = toNonNegativeNumber(row.carryForwardBalance, "carryForwardBalance");
+        const adjustment = toNumber(row.adjustmentBalance, "adjustmentBalance");
+        const expired = toNonNegativeNumber(row.expiredBalance, "expiredBalance");
+        const expiry = row.openingBalanceExpiryDate ? new Date(row.openingBalanceExpiryDate) : null;
+        if (row.openingBalanceExpiryDate && Number.isNaN(expiry.getTime())) throw new Error("Invalid openingBalanceExpiryDate.");
+
+        await session.withTransaction(async () => {
+          let balance = await UserLeaveBalance.findOne({ userId, leaveTypeId, leaveYear: year }).session(session);
+          const before = Number(balance?.availableBalance || 0);
+          const used = Number(balance?.usedBalance || 0);
+          const pending = Number(balance?.pendingBalance || 0);
+          const after = calculateAvailableBalance({ openingBalance: opening, accruedBalance: accrued, carryForwardBalance: carryForward, adjustmentBalance: adjustment, usedBalance: used, expiredBalance: expired });
+          if (after < pending || after < 0) throw new Error("Configured balance is below pending/used constraints.");
+          const isNew = !balance;
+          if (!balance) balance = new UserLeaveBalance({ userId, leaveTypeId, leaveYear: year, usedBalance: 0, pendingBalance: 0 });
+          Object.assign(balance, { openingBalance: opening, accruedBalance: accrued, carryForwardBalance: carryForward, adjustmentBalance: adjustment, expiredBalance: expired, availableBalance: after, isActive: true, lastUpdatedAt: new Date() });
+          await balance.save({ session });
+
+          if (isNew) {
+            const lots = [
+              ["Opening Balance", opening, expiry],
+              ["Accrual", accrued, null],
+              ["Carry Forward", carryForward, null],
+              ...(adjustment > 0 ? [["Manual Adjustment", adjustment, null]] : []),
+            ].filter((x) => x[1] > 0);
+            if (lots.length) await LeaveBalanceTransaction.create(lots.map(([type, amount, expiryDate]) => ({
+              userId, leaveTypeId, leaveBalanceId: balance._id, leaveYear: year, transactionType: type,
+              amount, remainingAmount: amount, consumedAmount: 0, expiredAmount: 0, expiryDate,
+              balanceBefore: 0, balanceAfter: after, referenceType: "Manual", referenceId: balance._id,
+              reason: "Bulk leave balance import.", transactionDate: new Date(), createdBy: adminId,
+            })), { session });
+          } else if (before !== after) {
+            await LeaveBalanceTransaction.create([{
+              userId, leaveTypeId, leaveBalanceId: balance._id, leaveYear: year, transactionType: "Manual Adjustment",
+              amount: Math.abs(after - before), remainingAmount: Math.max(after - before, 0), consumedAmount: 0, expiredAmount: 0,
+              balanceBefore: before, balanceAfter: after, referenceType: "Manual", referenceId: balance._id,
+              reason: "Bulk leave balance import update.", transactionDate: new Date(), createdBy: adminId,
+            }], { session });
+          }
+          if (isNew) createdCount += 1; else updatedCount += 1;
+        });
+      } catch (error) {
+        rowErrors.push({ row: index + 2, userId: row.userId || "", message: error.message });
+      }
+    }
+    return res.status(200).json({ success: true, message: `Imported ${createdCount + updatedCount} row(s).`, data: { createdCount, updatedCount, failedCount: rowErrors.length, errors: rowErrors } });
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({ success: false, message: error.message || "Bulk import failed." });
+  } finally {
+    await session.endSession();
+  }
+};
+
 
 // ============================================================
 // UPDATE BALANCE BY ID - ADMIN

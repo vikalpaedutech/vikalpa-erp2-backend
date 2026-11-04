@@ -48,7 +48,7 @@ const userAttendanceSchema = new Schema(
      */
     attendanceSource: {
       type: String,
-      enum: ["Manual", "Leave", "System"],
+      enum: ["Manual", "Leave", "System", "Bulk"],
       default: "Manual",
       index: true,
     },

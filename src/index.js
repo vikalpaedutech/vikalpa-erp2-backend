@@ -3,6 +3,7 @@ import app from "./app.js"
 
 import connectDb from "./db/index.js"
 import { seedPermissions } from "./utils/permission-seed.js"
+import { startLeaveAccrualScheduler } from "./services/hr-management/leaveAccrual.service.js"
 
 dotenv.config({
     path:"./.env",
@@ -22,6 +23,7 @@ connectDb()
         await seedPermissions()
         app.listen(port, "0.0.0.0", ()=>{
             console.log(`Example app is listening on port ${port}`)
+            startLeaveAccrualScheduler()
         })
     })
     .catch((err)=>{

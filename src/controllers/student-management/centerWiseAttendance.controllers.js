@@ -157,7 +157,7 @@ export const createCenterWiseAttendance = async (req, res) => {
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        message: "Attendance PDF file is required",
+        message: "Attendance file is required (PDF, JPG, JPEG or PNG).",
       });
     }
 
@@ -279,7 +279,7 @@ export const createCenterWiseAttendance = async (req, res) => {
       return res.status(409).json({
         success: false,
         message:
-          "Attendance PDF already exists for this center, batch and date",
+          "Attendance file already exists for this center, batch and date",
       });
     }
 
@@ -295,9 +295,22 @@ export const createCenterWiseAttendance = async (req, res) => {
       attendanceDate.getMonth() + 1
     ).padStart(2, "0");
 
+    const originalExtension = String(req.file.originalname || "")
+      .split(".")
+      .pop()
+      .toLowerCase();
+    const allowedExtensions = ["pdf", "jpg", "jpeg", "png"];
+    const extension = allowedExtensions.includes(originalExtension)
+      ? originalExtension
+      : (req.file.mimetype === "application/pdf"
+          ? "pdf"
+          : req.file.mimetype === "image/png"
+            ? "png"
+            : "jpg");
+
     const key =
       `center-wise-attendance/${year}/${month}/` +
-      `${centerId}/${batchId}/${uniqueId}.pdf`;
+      `${centerId}/${batchId}/${uniqueId}.${extension}`;
 
     // --------------------------------------------------------
     // Upload to DigitalOcean Spaces
@@ -307,7 +320,7 @@ export const createCenterWiseAttendance = async (req, res) => {
       Bucket: process.env.SPACES_BUCKET,
       Key: key,
       Body: req.file.buffer,
-      ContentType: "application/pdf",
+      ContentType: req.file.mimetype,
       ContentLength: req.file.size,
       ACL: "private",
     });

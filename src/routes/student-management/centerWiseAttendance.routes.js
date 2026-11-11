@@ -11,7 +11,9 @@ downloadCenterWiseAttendanceTemplate,
 } from "../../controllers/student-management/centerWiseAttendance.controllers.js";
 
 import { verifyJWT } from "../../middlewares/auth.middlewares.js";
-import { uploadPdf } from "../../middlewares/upload.middlewares.js";
+import {
+  uploadCenterWiseAttendanceFile,
+} from "../../middlewares/upload.middlewares.js";
 
 const router = Router();
 
@@ -23,7 +25,7 @@ router.use(verifyJWT);
 router
   .route("/")
   .post(
-    uploadPdf.single("file"),
+    uploadCenterWiseAttendanceFile.single("file"),
     createCenterWiseAttendance
   );
 

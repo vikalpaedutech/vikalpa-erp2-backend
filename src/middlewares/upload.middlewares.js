@@ -87,6 +87,39 @@ export const uploadPdf = multer({
 
 
 // ============================================================
+// CENTER-WISE ATTENDANCE - PDF + JPG / JPEG / PNG
+// Dedicated middleware so existing PDF-only upload routes remain unchanged.
+// ============================================================
+
+const centerWiseAttendanceFileFilter = (req, file, cb) => {
+  const allowedMimeTypes = [
+    "application/pdf",
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+  ];
+
+  if (!allowedMimeTypes.includes(String(file.mimetype || "").toLowerCase())) {
+    return cb(
+      new Error("Only PDF, JPG, JPEG and PNG files are allowed."),
+      false
+    );
+  }
+
+  cb(null, true);
+};
+
+export const uploadCenterWiseAttendanceFile = multer({
+  storage,
+  fileFilter: centerWiseAttendanceFileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024,
+    files: 1,
+  },
+});
+
+
+// ============================================================
 // IMAGE UPLOAD
 // ============================================================
 

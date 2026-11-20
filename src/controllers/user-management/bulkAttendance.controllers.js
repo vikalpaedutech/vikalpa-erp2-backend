@@ -5,19 +5,86 @@ import { UserAttendance } from "../../models/user-management/userAttendance.mode
 
 const TYPES = ["Daily Attendance","Orientation","Feild Visit","Event","Center Visit","Half Day"];
 const STATUSES = ["Present","WFH","Absent"];
-const dateOnly = value => { const d=new Date(value); if(Number.isNaN(d.getTime())) return null; d.setUTCHours(0,0,0,0); return d; };
+const dateOnly = value => {
+ if (value === undefined || value === null || String(value).trim() === "") return null;
+
+ // SheetJS returns Excel date cells as JavaScript Date objects when
+ // cellDates:true. Preserve the calendar date shown in Excel using local
+ // date components; using setUTCHours(0,0,0,0) can move IST-midnight dates
+ // to the previous UTC calendar day.
+ if (value instanceof Date) {
+  if (Number.isNaN(value.getTime())) return null;
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+ }
+
+ // Handle Excel serial date values if a workbook supplies the raw number.
+ if (typeof value === "number" && Number.isFinite(value)) {
+  const parts = XLSX.SSF.parse_date_code(value);
+  if (!parts) return null;
+  return new Date(Date.UTC(parts.y, parts.m - 1, parts.d));
+ }
+
+ const text = String(value).trim();
+ // Date-only ISO strings are already calendar dates; construct UTC midnight.
+ const isoDate = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+ if (isoDate) {
+  const [, year, month, day] = isoDate;
+  return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+ }
+
+ const parsed = new Date(text);
+ if (Number.isNaN(parsed.getTime())) return null;
+ return new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate()));
+};
 const isTimeProvided = value =>
  value !== undefined &&
  value !== null &&
  String(value).trim() !== "" &&
  String(value).trim().toLowerCase() !== "null";
 
+// Excel bulk-template times are entered as India local time (IST).
+// Convert that wall-clock time to a UTC instant before saving MongoDB Date.
 const parseTime = (value, day) => {
- if(!isTimeProvided(value)) return null;
- if(value instanceof Date){const d=new Date(day);d.setUTCHours(value.getUTCHours(),value.getUTCMinutes(),0,0);return d;}
- const text=String(value).trim();
- const m=text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/); if(!m)return null;
- const d=new Date(day);d.setUTCHours(Number(m[1]),Number(m[2]),Number(m[3]||0),0);return d;
+ if (!isTimeProvided(value)) return null;
+
+ let hours = 0;
+ let minutes = 0;
+ let seconds = 0;
+
+ // Excel may expose a time-only cell as a Date or as a fraction of a day.
+ if (value instanceof Date && !Number.isNaN(value.getTime())) {
+  hours = value.getUTCHours();
+  minutes = value.getUTCMinutes();
+  seconds = value.getUTCSeconds();
+ } else if (typeof value === "number" && Number.isFinite(value)) {
+  const totalSeconds = Math.round(((value % 1) + 1) % 1 * 24 * 60 * 60);
+  hours = Math.floor(totalSeconds / 3600);
+  minutes = Math.floor((totalSeconds % 3600) / 60);
+  seconds = totalSeconds % 60;
+ } else {
+  const text = String(value).trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  hours = Number(match[1]);
+  minutes = Number(match[2]);
+  seconds = Number(match[3] || 0);
+ }
+
+ if (hours > 23 || minutes > 59 || seconds > 59) return null;
+
+ // Treat spreadsheet wall-clock values as Asia/Kolkata (UTC+05:30).
+ // Example: 2026-11-14 08:44 IST is stored as 2026-11-14T03:14:00.000Z.
+ const attendanceDay = new Date(day);
+ if (Number.isNaN(attendanceDay.getTime())) return null;
+ const utcMidnight = Date.UTC(
+  attendanceDay.getUTCFullYear(),
+  attendanceDay.getUTCMonth(),
+  attendanceDay.getUTCDate(),
+  hours,
+  minutes,
+  seconds
+ );
+ return new Date(utcMidnight - (5 * 60 + 30) * 60 * 1000);
 };
 export const downloadBulkAttendanceTemplate = async (req,res) => {
  const wb=XLSX.utils.book_new();
@@ -34,7 +101,7 @@ export const downloadBulkAttendanceTemplate = async (req,res) => {
 export const uploadBulkAttendance = async (req,res) => {
  try{
   if(!req.file?.buffer)return res.status(400).json({success:false,message:"Upload an Excel template file."});
-  const wb=XLSX.read(req.file.buffer,{type:"buffer",cellDates:true});
+  const wb=XLSX.read(req.file.buffer,{type:"buffer",cellDates:false});
   const sheet=wb.Sheets[wb.SheetNames[0]], rows=XLSX.utils.sheet_to_json(sheet,{defval:""});
   const actor=req.user?._id;if(!actor)return res.status(401).json({success:false,message:"Unauthorized."});
   const results={created:0,updated:0,failed:[],total:rows.length};
@@ -60,6 +127,10 @@ export const uploadBulkAttendance = async (req,res) => {
    if(existing){Object.assign(existing,payload);await existing.save();results.updated++;}
    else{await UserAttendance.create(payload);results.created++;}
   }
-  return res.status(200).json({success:true,message:"Bulk attendance processed.",data:results});
+  return res.status(200).json({
+   success: true,
+   message: "Bulk attendance processed. Excel check-in/check-out values were interpreted as Asia/Kolkata (IST) and stored as UTC.",
+   data: { ...results, inputTimeZone: "Asia/Kolkata", storageTimeZone: "UTC" },
+  });
  }catch(error){console.error("Bulk attendance upload:",error);return res.status(500).json({success:false,message:error.message||"Bulk attendance failed."});}
 };

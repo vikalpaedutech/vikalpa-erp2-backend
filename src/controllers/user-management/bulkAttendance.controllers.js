@@ -6,8 +6,14 @@ import { UserAttendance } from "../../models/user-management/userAttendance.mode
 const TYPES = ["Daily Attendance","Orientation","Feild Visit","Event","Center Visit","Half Day"];
 const STATUSES = ["Present","WFH","Absent"];
 const dateOnly = value => { const d=new Date(value); if(Number.isNaN(d.getTime())) return null; d.setUTCHours(0,0,0,0); return d; };
+const isTimeProvided = value =>
+ value !== undefined &&
+ value !== null &&
+ String(value).trim() !== "" &&
+ String(value).trim().toLowerCase() !== "null";
+
 const parseTime = (value, day) => {
- if(value===undefined||value===null||value==="") return null;
+ if(!isTimeProvided(value)) return null;
  if(value instanceof Date){const d=new Date(day);d.setUTCHours(value.getUTCHours(),value.getUTCMinutes(),0,0);return d;}
  const text=String(value).trim();
  const m=text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/); if(!m)return null;
@@ -19,7 +25,7 @@ export const downloadBulkAttendanceTemplate = async (req,res) => {
  ["PASTE_USER_OBJECT_ID","2026-11-03","Daily Attendance","Present","09:30","17:30","","Bulk attendance marked by HR",""]];
  const ws=XLSX.utils.aoa_to_sheet(rows);ws["!cols"]=[{wch:28},{wch:20},{wch:22},{wch:14},{wch:18},{wch:18},{wch:28},{wch:36},{wch:36}];
  XLSX.utils.book_append_sheet(wb,ws,"Bulk Attendance");
- const guide=XLSX.utils.aoa_to_sheet([["Field","Instruction"],["User Object ID","Required: exact MongoDB User _id from Users collection"],["Date","Required: YYYY-MM-DD"],["Attendance Type",TYPES.join(" | ")],["Status",STATUSES.join(" | ")],["Check In / Check Out","Optional; HH:mm, 24-hour format"],["Visited Location","Optional; required for Orientation, Feild Visit, Event and Center Visit"],["Manual Attendance Reason","Required for bulk marking"],["Remarks","Optional"],["Existing record","Same user + date + attendance type is updated, not duplicated"],["Leave","Approved leave records cannot be overwritten by bulk attendance"]]);
+ const guide=XLSX.utils.aoa_to_sheet([["Field","Instruction"],["User Object ID","Required: exact MongoDB User _id from Users collection"],["Date","Required: YYYY-MM-DD"],["Attendance Type",TYPES.join(" | ")],["Status",STATUSES.join(" | ")],["Check In / Check Out","Optional; HH:mm (24-hour format), blank, or the literal value null"],["Visited Location","Optional; required for Orientation, Feild Visit, Event and Center Visit"],["Manual Attendance Reason","Required for bulk marking"],["Remarks","Optional"],["Existing record","Same user + date + attendance type is updated, not duplicated"],["Leave","Approved leave records cannot be overwritten by bulk attendance"]]);
  XLSX.utils.book_append_sheet(wb,guide,"Instructions");
  const buffer=XLSX.write(wb,{type:"buffer",bookType:"xlsx"});
  res.setHeader("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -49,7 +55,7 @@ export const uploadBulkAttendance = async (req,res) => {
    const existing=await UserAttendance.findOne({userId,date,attendanceType:finalType});
    if(existing?.attendanceSource==="Leave"){results.failed.push({row:line,userId,message:"Approved leave cannot be overwritten"});continue;}
    const checkIn=parseTime(r["Check In (HH:mm)"],date),checkOut=parseTime(r["Check Out (HH:mm)"],date);
-   if(r["Check In (HH:mm)"]&&!checkIn||r["Check Out (HH:mm)"]&&!checkOut){results.failed.push({row:line,userId,message:"Time must use HH:mm 24-hour format"});continue;}
+   if((isTimeProvided(r["Check In (HH:mm)"])&&!checkIn)||(isTimeProvided(r["Check Out (HH:mm)"])&&!checkOut)){results.failed.push({row:line,userId,message:"Time must use HH:mm 24-hour format, or leave it blank / enter null"});continue;}
    const payload={userId,date,attendanceType:finalType,status:finalStatus,attendanceSource:"Bulk",checkIn,checkOut,visitedLocation:location||null,latitude:0,longitude:0,markedBy:actor,manualAttendanceReason:reason,remarks:remarks||null,leaveId:null};
    if(existing){Object.assign(existing,payload);await existing.save();results.updated++;}
    else{await UserAttendance.create(payload);results.created++;}

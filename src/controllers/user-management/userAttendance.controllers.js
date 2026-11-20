@@ -86,23 +86,6 @@ export const createUserAttendance = async (req, res) => {
 
 
     if (isMarkingAnotherUser) {
-
-      if (!manualAttendanceReason?.trim()) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Manual attendance reason is required when marking attendance for another user.",
-        });
-      }
-
-
-      if (!remarks?.trim()) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Remarks are required when marking attendance for another user.",
-        });
-      }
     }
 
 
@@ -571,7 +554,7 @@ export const getUserAttendance = async (
           Number(limit),
           1
         ),
-        100
+        5000
       );
 
 
@@ -758,7 +741,7 @@ export const getMyUserAttendance = async (req, res) => {
     const pageNumber = Math.max(Number.parseInt(page, 10) || 1, 1);
     const limitNumber = Math.min(
       Math.max(Number.parseInt(limit, 10) || 100, 1),
-      100
+      5000
     );
     const skip = (pageNumber - 1) * limitNumber;
 

@@ -1,0 +1,12 @@
+import { Router } from "express";
+import { verifyJWT } from "../../middlewares/auth.middlewares.js";
+import { getBiometricUsers, getBiometricAttendance, getBiometricUserAttendanceByDate, manageBiometricUserAttendanceDay, updateBiometricAttendanceLog, pushBiometricAttendance } from "../../controllers/user-management/biometricAttendance.controllers.js";
+const router = Router();
+router.use(verifyJWT);
+router.get("/users", getBiometricUsers);
+router.get("/attendance", getBiometricAttendance);
+router.get("/attendance/users/:biometricUserId/days", getBiometricUserAttendanceByDate);
+router.put("/attendance/users/:biometricUserId/days/:date", manageBiometricUserAttendanceDay);
+router.patch("/attendance/logs/:id", updateBiometricAttendanceLog);
+router.post("/attendance/push", pushBiometricAttendance);
+export default router;

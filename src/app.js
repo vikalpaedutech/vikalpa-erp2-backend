@@ -119,6 +119,7 @@ import userLeaveApprovalRouter from "./routes/user-management/userLeaveApproval.
 
 import leaveApprovalRuleRouter from "./routes/user-management/leaveApprovalRule.routes.js";
 import userAttendanceRouter from "./routes/user-management/userAttendance.routes.js";
+import biometricAttendanceRouter from "./routes/user-management/biometricAttendance.routes.js";
 import gamificationRouter from "./routes/gamification-management/gamification.routes.js";
 import userPermissionRouter from "./routes/user-management/userPermission.routes.js";
 import dashboardRouter from "./routes/dashboard-management/dashboard.routes.js";
@@ -359,6 +360,11 @@ app.use(
 app.use(
   "/api/v1/user-management/user-attendance",
   userAttendanceRouter
+);
+
+app.use(
+  "/api/v1/user-management/biometric",
+  biometricAttendanceRouter
 );
 
 app.use(

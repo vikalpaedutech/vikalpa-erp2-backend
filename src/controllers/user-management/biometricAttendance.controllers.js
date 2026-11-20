@@ -28,7 +28,14 @@ export const getBiometricUsers = async (req, res) => {
       BiometricUser.find(filter).sort({ employeeName: 1 }).skip(skip).limit(Math.min(500, Math.max(1, Number(limit)))).lean(),
       BiometricUser.countDocuments(filter),
     ]);
-    res.json({ success: true, data: { users, total, page: Number(page), limit: Number(limit) } });
+    const employeeIds = [...new Set(users.map((item) => String(item.empId || "")).filter(Boolean))];
+    const linkedUsers = await User.find({ userId: { $in: employeeIds } }).select("_id userId").lean();
+    const userIdByEmployeeId = new Map(linkedUsers.map((item) => [String(item.userId), String(item._id)]));
+    const enrichedUsers = users.map((item) => ({
+      ...item,
+      linkedUserId: userIdByEmployeeId.get(String(item.empId || "")) || null,
+    }));
+    res.json({ success: true, data: { users: enrichedUsers, total, page: Number(page), limit: Number(limit) } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message || "Unable to load biometric users." });
   }
@@ -93,6 +100,13 @@ export const getBiometricUserAttendanceByDate = async (req, res) => {
     if (!validDate(fromDate) || !validDate(toDate) || fromDate > toDate) return res.status(400).json({ success: false, message: "Select a valid date range." });
     const biometricUser = await BiometricUser.findById(biometricUserId).lean();
     if (!biometricUser) return res.status(404).json({ success: false, message: "Biometric user not found." });
+    const linkedUser = biometricUser.empId
+      ? await User.findOne({ userId: String(biometricUser.empId) }).select("_id userId").lean()
+      : null;
+    const employeeForResponse = {
+      ...biometricUser,
+      linkedUserId: linkedUser ? String(linkedUser._id) : null,
+    };
     const identifiers = [biometricUser.employeeNoString, biometricUser.biometricUserId].filter(Boolean).map(String);
     const logs = await BiometricAttendanceLog.find({
       eventTime: { $gte: `${fromDate}T00:00:00`, $lte: `${toDate}T23:59:59` },
@@ -118,7 +132,7 @@ export const getBiometricUserAttendanceByDate = async (req, res) => {
       rows.push({ date, checkIn: dayLogs[0] || null, checkOut: dayLogs.length > 1 ? dayLogs[dayLogs.length - 1] : null, logs: dayLogs });
       cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
-    res.json({ success: true, data: { biometricUser, attendance: rows } });
+    res.json({ success: true, data: { biometricUser: employeeForResponse, attendance: rows } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message || "Unable to load employee biometric attendance." });
   }

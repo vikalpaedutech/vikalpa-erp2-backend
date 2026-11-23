@@ -1,3 +1,4 @@
+import XLSX from "xlsx";
 import mongoose from "mongoose";
 import { BiometricUser } from "../../models/user-management/biometricUser.models.js";
 import { BiometricAttendanceLog } from "../../models/user-management/biometricAttendanceLog.models.js";
@@ -229,4 +230,59 @@ export const pushBiometricAttendance = async (req, res) => {
     console.error("PUSH BIOMETRIC ATTENDANCE ERROR:", error);
     res.status(500).json({ success: false, message: error.message || "Unable to push biometric attendance." });
   }
+};
+
+
+export const updateBiometricUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { officeTime = "", leaveTime = "", workingHours = "" } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid biometric user ID." });
+    const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (officeTime && !timePattern.test(officeTime)) return res.status(400).json({ success: false, message: "Office Time must be HH:mm." });
+    if (leaveTime && !timePattern.test(leaveTime)) return res.status(400).json({ success: false, message: "Leave Time must be HH:mm." });
+    if (workingHours !== "" && (!Number.isFinite(Number(workingHours)) || Number(workingHours) < 0 || Number(workingHours) > 24)) return res.status(400).json({ success: false, message: "Working Hours must be between 0 and 24." });
+    const user = await BiometricUser.findByIdAndUpdate(id, { $set: { officeTime, leaveTime, workingHours: workingHours === "" ? null : Number(workingHours), updatedAt: new Date(), attendanceTimingsUpdatedAt: new Date(), attendanceTimingsUpdatedBy: req.user?._id } }, { new: true, runValidators: true }).lean();
+    if (!user) return res.status(404).json({ success: false, message: "Biometric user not found." });
+    return res.json({ success: true, message: "Biometric user timings updated.", data: user });
+  } catch (error) { return res.status(500).json({ success: false, message: error.message || "Unable to update biometric user." }); }
+};
+
+export const downloadBiometricUsersTemplate = async (_req, res) => {
+  const rows = [{ "Employee ID": "", "Office Time (HH:mm)": "", "Leave Time (HH:mm)": "", "Working Hours": "" }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Biometric Timings");
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="biometric-user-timings-template.xlsx"');
+  return res.send(buffer);
+};
+
+export const bulkUpdateBiometricUsers = async (req, res) => {
+  try {
+    if (!req.file?.buffer) return res.status(400).json({ success: false, message: "Please upload an Excel file." });
+    const wb = XLSX.read(req.file.buffer, { type: "buffer" });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+    if (!rows.length) return res.status(400).json({ success: false, message: "The uploaded template has no rows." });
+    const normalize = (v) => String(v ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+    const get = (row, aliases) => { const key = Object.keys(row).find(k => aliases.includes(normalize(k))); return key ? row[key] : ""; };
+    const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+    const errors = []; let modified = 0; let unmatched = 0;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const empId = String(get(row, ["employeeid", "empid", "employeeidnumber"])).trim();
+      const officeTime = String(get(row, ["officetime", "officetimehhmm"])).trim();
+      const leaveTime = String(get(row, ["leavetime", "leavetimehhmm"])).trim();
+      const hoursRaw = get(row, ["workinghours"]);
+      if (!empId) { errors.push(`Row ${i + 2}: Employee ID is required.`); continue; }
+      if (officeTime && !timePattern.test(officeTime)) { errors.push(`Row ${i + 2}: Invalid Office Time; use HH:mm.`); continue; }
+      if (leaveTime && !timePattern.test(leaveTime)) { errors.push(`Row ${i + 2}: Invalid Leave Time; use HH:mm.`); continue; }
+      const workingHours = hoursRaw === "" ? null : Number(hoursRaw);
+      if (workingHours !== null && (!Number.isFinite(workingHours) || workingHours < 0 || workingHours > 24)) { errors.push(`Row ${i + 2}: Working Hours must be between 0 and 24.`); continue; }
+      const result = await BiometricUser.updateMany({ empId }, { $set: { officeTime, leaveTime, workingHours, updatedAt: new Date(), attendanceTimingsUpdatedAt: new Date(), attendanceTimingsUpdatedBy: req.user?._id } });
+      if (result.matchedCount) modified += result.modifiedCount; else unmatched++;
+    }
+    return res.json({ success: true, message: "Biometric user timings bulk upload processed.", data: { updated: modified, unmatched, errors } });
+  } catch (error) { return res.status(500).json({ success: false, message: error.message || "Unable to process biometric users upload." }); }
 };

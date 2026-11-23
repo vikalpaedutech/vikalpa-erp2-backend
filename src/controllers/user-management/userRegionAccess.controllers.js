@@ -1125,8 +1125,8 @@ const getAllUserRegionAccess = asyncHandler(async (req, res) => {
       UserRegionAccess.find(filter)
         .populate("userId", "-password -refreshToken")
         .populate("districtId")
-        .populate("blockId")
-        .populate("centerId")
+        .populate({ path: "blockId", populate: { path: "districtId", select: "districtName" } })
+        .populate({ path: "centerId", populate: [{ path: "districtId", select: "districtName" }, { path: "blockId", select: "blockName" }] })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNumber),

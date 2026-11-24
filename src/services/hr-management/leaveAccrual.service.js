@@ -1,5 +1,4 @@
 import { User } from "../../models/user.models.js";
-import { UserRole } from "../../models/user-management/userRole.models.js";
 import { UserDesignation } from "../../models/user-management/userDesignation.models.js";
 import { LeavePolicy } from "../../models/hr-management/leavePolicy.models.js";
 import { LeaveType } from "../../models/hr-management/leaveType.models.js";
@@ -17,11 +16,10 @@ const due = (frequency, d) =>
 async function eligible(policy, users) {
   const e = policy.eligibility || {};
   if (e.applyToAll) return users.map((u) => u._id);
-  const [roleIds, designationIds] = await Promise.all([
-    e.roles?.length ? UserRole.find({ roleId: { $in: e.roles }, isActive: true }).distinct("userId") : [],
-    e.designations?.length ? UserDesignation.find({ designationId: { $in: e.designations }, isActive: true }).distinct("userId") : [],
-  ]);
-  const ids = new Set([...(e.users || []).map(String), ...roleIds.map(String), ...designationIds.map(String)]);
+  const designationIds = e.designations?.length
+    ? await UserDesignation.find({ designationId: { $in: e.designations }, isActive: true }).distinct("userId")
+    : [];
+  const ids = new Set([...(e.users || []).map(String), ...designationIds.map(String)]);
   return users.filter((u) => ids.has(String(u._id))).map((u) => u._id);
 }
 

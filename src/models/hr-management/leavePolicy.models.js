@@ -3,7 +3,6 @@ import mongoose, { Schema } from "mongoose";
 const leavePolicySchema = new Schema({
   leaveTypeId: { type: Schema.Types.ObjectId, ref: "LeaveType", required: true, unique: true, index: true },
   eligibility: {
-    roles: [{ type: Schema.Types.ObjectId, ref: "Role" }],
     designations: [{ type: Schema.Types.ObjectId, ref: "Designation" }],
     users: [{ type: Schema.Types.ObjectId, ref: "User" }],
     applyToAll: { type: Boolean, default: true },

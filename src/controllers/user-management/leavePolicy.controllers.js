@@ -1,13 +1,11 @@
 import mongoose from "mongoose";
 import { LeavePolicy } from "../../models/hr-management/leavePolicy.models.js";
 import { LeaveType } from "../../models/hr-management/leaveType.models.js";
-import { Role } from "../../models/permissions-management/role.models.js";
 import { Designation } from "../../models/program-management/designation.models.js";
 import { User } from "../../models/user.models.js";
 
 const populatePolicy = (query) => query
   .populate({ path: "leaveTypeId", select: "name code isPaid isActive" })
-  .populate({ path: "eligibility.roles", select: "roleName roleCode" })
   .populate({ path: "eligibility.designations", select: "designation designationCode" })
   .populate({ path: "eligibility.users", select: "name email userId" });
 
@@ -23,7 +21,6 @@ const normalizePayload = (body) => ({
   isActive: body.isActive !== false,
   eligibility: {
     applyToAll: body.eligibility?.applyToAll !== false,
-    roles: Array.isArray(body.eligibility?.roles) ? body.eligibility.roles : [],
     designations: Array.isArray(body.eligibility?.designations) ? body.eligibility.designations : [],
     users: Array.isArray(body.eligibility?.users) ? body.eligibility.users : [],
   },
@@ -51,15 +48,14 @@ export const upsertLeavePolicy = async (req, res) => {
 
     const payload = normalizePayload(req.body);
     const eligibility = payload.eligibility;
-    if (!eligibility.applyToAll && !eligibility.roles.length && !eligibility.designations.length && !eligibility.users.length) {
-      return res.status(400).json({ success: false, message: "Select at least one role, designation or employee, or enable Apply to all." });
+    if (!eligibility.applyToAll && !eligibility.designations.length && !eligibility.users.length) {
+      return res.status(400).json({ success: false, message: "Select at least one designation or employee, or enable Apply to all." });
     }
-    const [validRoles, validDesignations, validUsers] = await Promise.all([
-      Role.countDocuments({ _id: { $in: eligibility.roles }, isActive: true }),
+    const [validDesignations, validUsers] = await Promise.all([
       Designation.countDocuments({ _id: { $in: eligibility.designations }, isActive: true }),
       User.countDocuments({ _id: { $in: eligibility.users }, isActive: true }),
     ]);
-    if (validRoles !== eligibility.roles.length || validDesignations !== eligibility.designations.length || validUsers !== eligibility.users.length) {
+    if (validDesignations !== eligibility.designations.length || validUsers !== eligibility.users.length) {
       return res.status(400).json({ success: false, message: "One or more selected eligibility records are invalid or inactive." });
     }
     if (payload.accrualFrequency !== "none" && payload.accrualAmount <= 0) {
@@ -76,7 +72,6 @@ export const upsertLeavePolicy = async (req, res) => {
     );
     await policy.populate([
       { path: "leaveTypeId", select: "name code isPaid isActive" },
-      { path: "eligibility.roles", select: "roleName roleCode" },
       { path: "eligibility.designations", select: "designation designationCode" },
       { path: "eligibility.users", select: "name email userId" },
     ]);

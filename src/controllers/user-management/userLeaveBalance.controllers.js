@@ -1017,23 +1017,41 @@ export const bulkImportLeaveBalances = async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const adminId = await validateAdmin(req);
-    const { leaveTypeId, rows } = req.body;
-    if (!mongoose.Types.ObjectId.isValid(leaveTypeId) || !Array.isArray(rows) || !rows.length) {
-      return res.status(400).json({ success: false, message: "Valid leave type and non-empty rows are required." });
+    const { rows, leaveTypeId: defaultLeaveTypeId } = req.body || {};
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(400).json({ success: false, message: "Non-empty rows with userId and Leave Type are required." });
     }
-    const leaveType = await LeaveType.findOne({ _id: leaveTypeId, isActive: true });
-    if (!leaveType) return res.status(404).json({ success: false, message: "Active leave type not found." });
 
     let createdCount = 0;
     let updatedCount = 0;
     const rowErrors = [];
+
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index];
       try {
         const userId = String(row.userId || "").trim();
         if (!mongoose.Types.ObjectId.isValid(userId)) throw new Error("Invalid userId.");
-        const user = await User.findOne({ _id: userId, isActive: true }).select("_id");
+        const user = await User.findOne({ _id: userId, isActive: true }).select("_id name userId");
         if (!user) throw new Error("Active employee not found.");
+
+        const rawLeaveType = String(row.leaveType || row.leaveTypeCode || row.leaveTypeId || defaultLeaveTypeId || "").trim();
+        if (!rawLeaveType) throw new Error("Leave Type is required in this row.");
+        let leaveType = null;
+        if (mongoose.Types.ObjectId.isValid(rawLeaveType)) {
+          leaveType = await LeaveType.findOne({ _id: rawLeaveType, isActive: true });
+        }
+        if (!leaveType) {
+          const normalized = rawLeaveType.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          leaveType = await LeaveType.findOne({
+            isActive: true,
+            $or: [
+              { code: { $regex: `^${normalized}$`, $options: "i" } },
+              { name: { $regex: `^${normalized}$`, $options: "i" } },
+            ],
+          });
+        }
+        if (!leaveType) throw new Error(`Active Leave Type "${rawLeaveType}" not found. Use its code (e.g. CL) or exact name.`);
+
         const year = ensureValidYear(row.leaveYear);
         const opening = toNonNegativeNumber(row.openingBalance, "openingBalance");
         const accrued = toNonNegativeNumber(row.accruedBalance, "accruedBalance");
@@ -1044,15 +1062,23 @@ export const bulkImportLeaveBalances = async (req, res) => {
         if (row.openingBalanceExpiryDate && Number.isNaN(expiry.getTime())) throw new Error("Invalid openingBalanceExpiryDate.");
 
         await session.withTransaction(async () => {
-          let balance = await UserLeaveBalance.findOne({ userId, leaveTypeId, leaveYear: year }).session(session);
+          let balance = await UserLeaveBalance.findOne({ userId, leaveTypeId: leaveType._id, leaveYear: year }).session(session);
           const before = Number(balance?.availableBalance || 0);
           const used = Number(balance?.usedBalance || 0);
           const pending = Number(balance?.pendingBalance || 0);
-          const after = calculateAvailableBalance({ openingBalance: opening, accruedBalance: accrued, carryForwardBalance: carryForward, adjustmentBalance: adjustment, usedBalance: used, expiredBalance: expired });
+          const after = calculateAvailableBalance({
+            openingBalance: opening, accruedBalance: accrued, carryForwardBalance: carryForward,
+            adjustmentBalance: adjustment, usedBalance: used, expiredBalance: expired,
+          });
           if (after < pending || after < 0) throw new Error("Configured balance is below pending/used constraints.");
+
           const isNew = !balance;
-          if (!balance) balance = new UserLeaveBalance({ userId, leaveTypeId, leaveYear: year, usedBalance: 0, pendingBalance: 0 });
-          Object.assign(balance, { openingBalance: opening, accruedBalance: accrued, carryForwardBalance: carryForward, adjustmentBalance: adjustment, expiredBalance: expired, availableBalance: after, isActive: true, lastUpdatedAt: new Date() });
+          if (!balance) balance = new UserLeaveBalance({ userId, leaveTypeId: leaveType._id, leaveYear: year, usedBalance: 0, pendingBalance: 0 });
+          Object.assign(balance, {
+            openingBalance: opening, accruedBalance: accrued, carryForwardBalance: carryForward,
+            adjustmentBalance: adjustment, expiredBalance: expired, availableBalance: after,
+            isActive: true, lastUpdatedAt: new Date(),
+          });
           await balance.save({ session });
 
           if (isNew) {
@@ -1063,15 +1089,16 @@ export const bulkImportLeaveBalances = async (req, res) => {
               ...(adjustment > 0 ? [["Manual Adjustment", adjustment, null]] : []),
             ].filter((x) => x[1] > 0);
             if (lots.length) await LeaveBalanceTransaction.create(lots.map(([type, amount, expiryDate]) => ({
-              userId, leaveTypeId, leaveBalanceId: balance._id, leaveYear: year, transactionType: type,
-              amount, remainingAmount: amount, consumedAmount: 0, expiredAmount: 0, expiryDate,
-              balanceBefore: 0, balanceAfter: after, referenceType: "Manual", referenceId: balance._id,
+              userId, leaveTypeId: leaveType._id, leaveBalanceId: balance._id, leaveYear: year,
+              transactionType: type, amount, remainingAmount: amount, consumedAmount: 0, expiredAmount: 0,
+              expiryDate, balanceBefore: 0, balanceAfter: after, referenceType: "Manual", referenceId: balance._id,
               reason: "Bulk leave balance import.", transactionDate: new Date(), createdBy: adminId,
             })), { session });
           } else if (before !== after) {
             await LeaveBalanceTransaction.create([{
-              userId, leaveTypeId, leaveBalanceId: balance._id, leaveYear: year, transactionType: "Manual Adjustment",
-              amount: Math.abs(after - before), remainingAmount: Math.max(after - before, 0), consumedAmount: 0, expiredAmount: 0,
+              userId, leaveTypeId: leaveType._id, leaveBalanceId: balance._id, leaveYear: year,
+              transactionType: "Manual Adjustment", amount: Math.abs(after - before),
+              remainingAmount: Math.max(after - before, 0), consumedAmount: 0, expiredAmount: 0,
               balanceBefore: before, balanceAfter: after, referenceType: "Manual", referenceId: balance._id,
               reason: "Bulk leave balance import update.", transactionDate: new Date(), createdBy: adminId,
             }], { session });
@@ -1079,10 +1106,15 @@ export const bulkImportLeaveBalances = async (req, res) => {
           if (isNew) createdCount += 1; else updatedCount += 1;
         });
       } catch (error) {
-        rowErrors.push({ row: index + 2, userId: row.userId || "", message: error.message });
+        rowErrors.push({ row: index + 2, userId: row.userId || "", leaveType: row.leaveType || "", message: error.message });
       }
     }
-    return res.status(200).json({ success: true, message: `Imported ${createdCount + updatedCount} row(s).`, data: { createdCount, updatedCount, failedCount: rowErrors.length, errors: rowErrors } });
+
+    return res.status(200).json({
+      success: true,
+      message: `Imported ${createdCount + updatedCount} leave balance row(s).`,
+      data: { createdCount, updatedCount, failedCount: rowErrors.length, errors: rowErrors },
+    });
   } catch (error) {
     return res.status(error.statusCode || 400).json({ success: false, message: error.message || "Bulk import failed." });
   } finally {

@@ -11,6 +11,7 @@ const definitions = [
   ["Leave Type Manage","leave.type.manage","hr_management","leave_types"],
   ["Leave Rule Manage","leave.rule.manage","hr_management","leave_approval_rules"],
   ["Leave Balance Manage","leave.balance.manage","hr_management","leave_balance"],
+  ["Holiday Calendar Manage","holiday.calendar.manage","hr_management","holiday_calendar"],
 
   ["Class Interaction View","class-interaction.view","class_interaction","view"],
   ["Dashboard View","dashboard.view","dashboard","view"],

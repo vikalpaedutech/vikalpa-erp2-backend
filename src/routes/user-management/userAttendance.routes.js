@@ -10,6 +10,9 @@ import {
   updateUserAttendance,
   checkoutUserAttendance,
   getMyUserAttendance,
+  getAttendanceLeaveOptions,
+  markAttendanceLeave,
+  removeAdminMarkedLeaveAttendance,
 } from "../../controllers/user-management/userAttendance.controllers.js";
 
 import {
@@ -22,6 +25,10 @@ import { uploadImage } from "../../middlewares/upload.middlewares.js";
 const router = Router();
 
 router.use(verifyJWT);
+
+router.get("/leave-options/:userId", getAttendanceLeaveOptions);
+router.post("/mark-leave", markAttendanceLeave);
+router.delete("/:id/admin-leave", removeAdminMarkedLeaveAttendance);
 router.get("/bulk/template", downloadBulkAttendanceTemplate);
 router.post("/bulk", bulkUpload.single("file"), uploadBulkAttendance);
 

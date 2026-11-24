@@ -124,6 +124,7 @@ import gamificationRouter from "./routes/gamification-management/gamification.ro
 import userPermissionRouter from "./routes/user-management/userPermission.routes.js";
 import dashboardRouter from "./routes/dashboard-management/dashboard.routes.js";
 import hrmsRouter from "./routes/hr-management/hrms.routes.js";
+import holidayCalendarRouter from "./routes/hr-management/holidayCalendar.routes.js";
 
 // ============================================================
 // ROUTES
@@ -380,6 +381,11 @@ app.use(
 app.use(
   "/api/v1/hrms",
   hrmsRouter
+);
+
+app.use(
+  "/api/v1/hrms/holidays",
+  holidayCalendarRouter
 );
 
 export default app;

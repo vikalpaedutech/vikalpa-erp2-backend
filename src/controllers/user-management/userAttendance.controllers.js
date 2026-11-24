@@ -11,6 +11,17 @@ import {
 
 
 import { syncGamificationPointsForActivity } from "../../services/gamification-management/gamificationCalculation.services.js";
+import { HolidayCalendar } from "../../models/hr-management/holidayCalendar.models.js";
+import { EmployeeHolidaySelections } from "../../models/hr-management/employeeHolidaySelections.models.js";
+import { UserDesignation } from "../../models/user-management/userDesignation.models.js";
+
+import { UserLeave } from "../../models/user-management/userLeave.models.js";
+import { UserLeaveBalance } from "../../models/user-management/userLeaveBalance.models.js";
+import { LeaveType } from "../../models/hr-management/leaveType.models.js";
+import { LeaveBalanceTransaction } from "../../models/user-management/leaveBalanceTransaction.models.js";
+import { consumeLeaveCredits } from "../../services/hr-management/leaveCreditLedger.service.js";
+import { createLeaveAttendance, removeLeaveAttendance } from "../../services/user-managment/userAttendance.services.js";
+
 
 // ============================================================
 // CREATE USER ATTENDANCE
@@ -585,9 +596,7 @@ export const getUserAttendance = async (
           "name email userId"
         )
 
-        .populate(
-          "leaveId"
-        )
+        .populate({ path: "leaveId", populate: { path: "leaveTypeId", select: "name code" } })
 
         .sort({
           date: -1,
@@ -677,6 +686,47 @@ export const getUserAttendance = async (
 // GET MY ATTENDANCE
 // ============================================================
 
+// Resolve applicable fixed holidays and selected floating holidays as virtual
+// attendance rows. No synthetic documents are persisted in UserAttendance.
+async function getMyAttendanceHolidayRows(userId, fromDate, toDate) {
+  if (!fromDate || !toDate || fromDate > toDate) return [];
+  const holidays = await HolidayCalendar.find({
+    year: { $gte: Number(fromDate.slice(0, 4)), $lte: Number(toDate.slice(0, 4)) },
+    date: { $gte: fromDate, $lte: toDate },
+    isActive: true
+  }).lean();
+  if (!holidays.length) return [];
+  const assignments = await UserDesignation.find({ userId, isActive: true })
+    .populate({ path: "designationId", select: "departmentId", populate: { path: "departmentId", select: "_id" } })
+    .lean();
+  const designationIds = new Set(assignments.map(x => String(x.designationId?._id || x.designationId)).filter(Boolean));
+  const departmentIds = new Set(assignments.map(x => String(x.designationId?.departmentId?._id || x.designationId?.departmentId || "")).filter(Boolean));
+  const selections = await EmployeeHolidaySelections.find({ employeeId: userId, status: "Confirmed" }).lean();
+  const selectedIds = new Set(selections.flatMap(x => (x.selectedHolidays || []).map(h => String(h.holidayId))));
+  return holidays.filter(holiday => {
+    const rule = holiday.applicableTo || {};
+    const eligible = rule.allEmployees !== false
+      || (rule.employees || []).some(id => String(id) === String(userId))
+      || (rule.designations || []).some(id => designationIds.has(String(id)))
+      || (rule.departments || []).some(id => departmentIds.has(String(id)));
+    return eligible && (!holiday.isOptional || selectedIds.has(String(holiday._id)));
+  }).map(holiday => ({
+    _id: `holiday-${holiday._id}`,
+    userId: String(userId),
+    date: `${holiday.date}T00:00:00.000Z`,
+    status: "Holiday",
+    attendanceType: "Holiday",
+    attendanceSource: "Holiday",
+    holidayId: holiday._id,
+    holidayName: holiday.name,
+    holidayType: holiday.type,
+    isOptionalHoliday: Boolean(holiday.isOptional),
+    checkIn: null,
+    checkOut: null,
+    remarks: holiday.name
+  }));
+}
+
 export const getMyUserAttendance = async (req, res) => {
   try {
     // Always scope this endpoint to the authenticated user. Do not mutate
@@ -749,7 +799,7 @@ export const getMyUserAttendance = async (req, res) => {
       UserAttendance.find(filter)
         .populate("userId", "name email userId")
         .populate("markedBy", "name email userId")
-        .populate("leaveId")
+        .populate({ path: "leaveId", populate: { path: "leaveTypeId", select: "name code" } })
         .sort({ date: -1, createdAt: -1 })
         .skip(skip)
         .limit(limitNumber),
@@ -767,15 +817,23 @@ export const getMyUserAttendance = async (req, res) => {
       }
     });
 
+    const holidayRows = await getMyAttendanceHolidayRows(userId, fromDate, toDate);
+    const existingDateKeys = new Set(attendance
+      .filter(record => ["Present", "WFH"].includes(record.status))
+      .map(record => record.date instanceof Date ? record.date.toISOString().slice(0, 10) : String(record.date || "").slice(0, 10)));
+    // Actual attendance takes precedence when an employee works on a holiday.
+    const visibleHolidayRows = holidayRows.filter(row => !existingDateKeys.has(String(row.date).slice(0, 10)));
+    const combinedAttendance = [...attendance, ...visibleHolidayRows].sort((a, b) => new Date(b.date) - new Date(a.date));
+
     return res.status(200).json({
       success: true,
       message: "User attendance fetched successfully.",
-      data: attendance,
+      data: combinedAttendance,
       pagination: {
-        total,
+        total: total + visibleHolidayRows.length,
         page: pageNumber,
         limit: limitNumber,
-        totalPages: Math.ceil(total / limitNumber),
+        totalPages: Math.ceil((total + visibleHolidayRows.length) / limitNumber),
       },
     });
   } catch (error) {
@@ -1438,5 +1496,319 @@ export const checkoutUserAttendance = async (req, res) => {
       success: false,
       message: error.message || "Failed to check out attendance.",
     });
+  }
+};
+
+
+// ============================================================
+// LEAVE OPTIONS FOR ADMIN ATTENDANCE MODAL
+// Returns active leave buckets and their available balances.
+// ============================================================
+export const getAttendanceLeaveOptions = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({ success: false, message: "Invalid employee ID." });
+    }
+
+    const year = Number(req.query.year || new Date().getFullYear());
+    if (!Number.isInteger(year) || year < 2000 || year > 3000) {
+      return res.status(400).json({ success: false, message: "Invalid leave year." });
+    }
+
+    const balances = await UserLeaveBalance.find({
+      userId,
+      leaveYear: year,
+      isActive: true,
+    }).populate({ path: "leaveTypeId", select: "name code isActive" }).lean();
+
+    let currentLeave = null;
+    if (req.query.currentAttendanceId && mongoose.isValidObjectId(req.query.currentAttendanceId)) {
+      const currentAttendance = await UserAttendance.findOne({
+        _id: req.query.currentAttendanceId,
+        userId,
+        attendanceSource: "Leave",
+      }).populate("leaveId").lean();
+      if (currentAttendance?.leaveId?.status === "Approved") currentLeave = currentAttendance.leaveId;
+    }
+
+    const options = balances
+      .filter(balance => balance.leaveTypeId?.isActive !== false)
+      .map(balance => {
+        const currentCredit = currentLeave && String(currentLeave.leaveTypeId) === String(balance.leaveTypeId?._id)
+          ? Number(currentLeave.numberOfDays || 1) : 0;
+        const availableBalance = Number(balance.availableBalance || 0) + currentCredit;
+        return {
+          leaveBalanceId: balance._id,
+          leaveTypeId: balance.leaveTypeId?._id,
+          name: balance.leaveTypeId?.name || "Leave",
+          code: balance.leaveTypeId?.code || "",
+          availableBalance,
+          label: `${balance.leaveTypeId?.code || balance.leaveTypeId?.name || "Leave"} (${availableBalance})`,
+        };
+      })
+      .filter(option => option.availableBalance > 0);
+
+    return res.status(200).json({
+      success: true,
+      message: "Employee leave balances fetched successfully.",
+      data: options,
+    });
+  } catch (error) {
+    console.error("GET ATTENDANCE LEAVE OPTIONS ERROR:", error);
+    return res.status(500).json({ success: false, message: error.message || "Unable to fetch employee leave balances." });
+  }
+};
+
+// ============================================================
+// MARK APPROVED LEAVE DIRECTLY FROM ADMIN ATTENDANCE
+// Creates the leave record, deducts the leave bucket, writes the
+// ledger transaction and creates Leave attendance atomically.
+// ============================================================
+async function restoreAdminMarkedLeave(leave, actorId, session, reason = "Admin/HR updated or removed attendance leave.") {
+  if (!leave || leave.status !== "Approved" ||
+      !String(leave.approvalReason || "").includes("Directly marked by an authorized attendance user.")) {
+    throw new Error("Only HR/Admin-marked attendance leave can be updated or removed here.");
+  }
+  const balance = await UserLeaveBalance.findOne({
+    userId: leave.userId,
+    leaveTypeId: leave.leaveTypeId,
+    leaveYear: leave.fromDate.getUTCFullYear(),
+    isActive: true,
+  }).session(session);
+  if (!balance) throw new Error("Leave balance record not found; cannot restore the leave.");
+  const days = Number(leave.numberOfDays || 1);
+  // Restore consumed credit lots as well as the balance snapshot so a
+  // subsequent replacement leave can consume the restored entitlement.
+  let creditToRestore = days;
+  const consumedCredits = await LeaveBalanceTransaction.find({
+    userId: leave.userId,
+    leaveTypeId: leave.leaveTypeId,
+    leaveYear: leave.fromDate.getUTCFullYear(),
+    transactionType: { $in: ["Opening Balance", "Accrual", "Carry Forward", "Manual Adjustment"] },
+    consumedAmount: { $gt: 0 },
+  }).sort({ expiryDate: -1, transactionDate: -1 }).session(session);
+  for (const credit of consumedCredits) {
+    if (creditToRestore <= 0) break;
+    const consumed = Number(credit.consumedAmount || 0);
+    const restoreAmount = Math.min(consumed, creditToRestore);
+    credit.consumedAmount = consumed - restoreAmount;
+    credit.remainingAmount = Number(credit.remainingAmount ?? Math.max(0, Number(credit.amount || 0) - consumed - Number(credit.expiredAmount || 0))) + restoreAmount;
+    await credit.save({ session });
+    creditToRestore -= restoreAmount;
+  }
+  const before = Number(balance.availableBalance || 0);
+  balance.usedBalance = Math.max(0, Number(balance.usedBalance || 0) - days);
+  balance.availableBalance = before + days;
+  balance.lastUpdatedAt = new Date();
+  await balance.save({ session });
+  await removeLeaveAttendance(leave._id, session);
+  leave.status = "Cancelled";
+  leave.cancelledAt = new Date();
+  leave.cancellationReason = reason;
+  leave.approvalReason = `${leave.approvalReason || ""} | Cancelled by authorized HR/Admin`;
+  await leave.save({ session });
+  await LeaveBalanceTransaction.create([{
+    userId: leave.userId,
+    leaveTypeId: leave.leaveTypeId,
+    leaveBalanceId: balance._id,
+    leaveId: leave._id,
+    leaveYear: leave.fromDate.getUTCFullYear(),
+    transactionType: "Leave Cancellation",
+    amount: days,
+    balanceBefore: before,
+    balanceAfter: before + days,
+    referenceType: "Manual",
+    referenceId: leave._id,
+    reason,
+    transactionDate: new Date(),
+    createdBy: actorId,
+  }], { session });
+}
+
+export const removeAdminMarkedLeaveAttendance = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const actorId = req.user?._id;
+    const attendanceId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(attendanceId)) {
+      return res.status(400).json({ success: false, message: "Invalid attendance ID." });
+    }
+    await session.withTransaction(async () => {
+      const attendance = await UserAttendance.findOne({
+        _id: attendanceId,
+        attendanceSource: "Leave",
+        leaveId: { $ne: null },
+      }).session(session);
+      if (!attendance) throw new Error("Admin-marked leave attendance not found.");
+      const leave = await UserLeave.findById(attendance.leaveId).session(session);
+      if (!leave) throw new Error("Linked leave record not found.");
+      await restoreAdminMarkedLeave(leave, actorId, session, "Leave removed by authorized HR/Admin from Attendance Management.");
+    });
+    return res.status(200).json({ success: true, message: "Leave removed and balance restored. Attendance will return to its calculated status." });
+  } catch (error) {
+    return res.status(400).json({ success: false, message: error.message || "Unable to remove leave." });
+  } finally {
+    await session.endSession();
+  }
+};
+
+export const markAttendanceLeave = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const actorId = req.user?._id;
+    const { userId, leaveTypeId, date, remarks, reason, replaceAttendanceId } = req.body || {};
+
+    if (!actorId) return res.status(401).json({ success: false, message: "Unauthorized user." });
+    if (!mongoose.Types.ObjectId.isValid(userId) || !mongoose.Types.ObjectId.isValid(leaveTypeId)) {
+      return res.status(400).json({ success: false, message: "Valid employee and leave type are required." });
+    }
+    if (replaceAttendanceId && !mongoose.Types.ObjectId.isValid(replaceAttendanceId)) {
+      return res.status(400).json({ success: false, message: "Invalid attendance record selected for conversion." });
+    }
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
+      return res.status(400).json({ success: false, message: "A valid leave date is required." });
+    }
+
+    const [year, month, day] = String(date).split("-").map(Number);
+    const leaveDate = new Date(Date.UTC(year, month - 1, day));
+    if (leaveDate.getUTCFullYear() !== year || leaveDate.getUTCMonth() !== month - 1 || leaveDate.getUTCDate() !== day) {
+      return res.status(400).json({ success: false, message: "Invalid leave date." });
+    }
+
+    const leaveType = await LeaveType.findOne({ _id: leaveTypeId, isActive: true }).lean();
+    if (!leaveType) return res.status(404).json({ success: false, message: "Active leave type not found." });
+
+    let createdLeave;
+    await session.withTransaction(async () => {
+      const existingAttendance = await UserAttendance.findOne({
+        userId,
+        date: leaveDate,
+      }).session(session);
+
+      if (existingAttendance) {
+        const isRequestedReplacement =
+          replaceAttendanceId &&
+          String(existingAttendance._id) === String(replaceAttendanceId);
+
+        if (!isRequestedReplacement) {
+          throw new Error(`Attendance already exists for this employee on ${date}.`);
+        }
+        if (existingAttendance.attendanceSource === "Leave") {
+          if (!existingAttendance.leaveId) throw new Error("Linked leave record not found.");
+          const previousLeave = await UserLeave.findById(existingAttendance.leaveId).session(session);
+          await restoreAdminMarkedLeave(previousLeave, actorId, session, "Leave updated by authorized HR/Admin from Attendance Management.");
+        } else {
+          if (existingAttendance.attendanceSource !== "Manual") {
+            throw new Error("Only manually marked attendance or an HR/Admin-marked leave can be replaced. Biometric/system records cannot be replaced here.");
+          }
+          await UserAttendance.deleteOne({ _id: existingAttendance._id }).session(session);
+        }
+      } else if (replaceAttendanceId) {
+        const oldRecord = await UserAttendance.findOne({
+          _id: replaceAttendanceId,
+          userId,
+          attendanceSource: "Manual",
+        }).session(session);
+        if (!oldRecord) {
+          throw new Error("The attendance record being edited could not be found or cannot be converted to leave.");
+        }
+        await UserAttendance.deleteOne({ _id: oldRecord._id }).session(session);
+      }
+
+      const overlappingLeave = await UserLeave.findOne({
+        userId,
+        status: { $in: ["Pending", "Approved"] },
+        fromDate: { $lte: leaveDate },
+        toDate: { $gte: leaveDate },
+      }).session(session);
+
+      if (overlappingLeave) throw new Error("This employee already has a pending or approved leave on the selected date.");
+
+      const balance = await UserLeaveBalance.findOne({
+        userId,
+        leaveTypeId,
+        leaveYear: year,
+        isActive: true,
+      }).session(session);
+
+      if (!balance) throw new Error("Leave balance is not configured for this employee and leave type.");
+
+      const available = Number(balance.availableBalance || 0);
+      if (available < 1) throw new Error("Insufficient leave balance.");
+
+      // One date selected in the attendance modal represents one full leave day.
+      const leaveDocs = await UserLeave.create([{
+        userId,
+        leaveTypeId,
+        fromDate: leaveDate,
+        toDate: leaveDate,
+        durationType: "Full Day",
+        halfDayType: null,
+        numberOfDays: 1,
+        reason: String(reason || "Leave marked by HR/Admin from Attendance Management").trim(),
+        status: "Approved",
+        appliedAt: new Date(),
+        approvedAt: new Date(),
+        approvalReason: "Directly marked by an authorized attendance user.",
+        remarks: String(remarks || "").trim() || null,
+      }], { session });
+
+      createdLeave = leaveDocs[0];
+
+      await consumeLeaveCredits({
+        userId,
+        leaveTypeId,
+        leaveYear: year,
+        leaveId: createdLeave._id,
+        amount: 1,
+        session,
+      });
+
+      const before = available;
+      balance.usedBalance = Number(balance.usedBalance || 0) + 1;
+      balance.availableBalance = before - 1;
+      balance.lastUpdatedAt = new Date();
+      await balance.save({ session });
+
+      await LeaveBalanceTransaction.create([{
+        userId,
+        leaveTypeId,
+        leaveBalanceId: balance._id,
+        leaveId: createdLeave._id,
+        leaveYear: year,
+        transactionType: "Leave Deduction",
+        amount: 1,
+        balanceBefore: before,
+        balanceAfter: before - 1,
+        referenceType: "Manual",
+        referenceId: createdLeave._id,
+        reason: "Leave marked directly from Admin Attendance.",
+        remarks: String(remarks || "").trim() || null,
+        transactionDate: new Date(),
+        createdBy: actorId,
+      }], { session });
+
+      await createLeaveAttendance(createdLeave, actorId, session);
+    });
+
+    const populatedLeave = await UserLeave.findById(createdLeave?._id)
+      .populate({ path: "leaveTypeId", select: "name code" })
+      .populate({ path: "userId", select: "name email userId" })
+      .lean();
+
+    return res.status(201).json({
+      success: true,
+      message: "Leave marked successfully and leave balance deducted.",
+      data: populatedLeave,
+    });
+  } catch (error) {
+    console.error("MARK ATTENDANCE LEAVE ERROR:", error);
+    return res.status(error.statusCode || 400).json({
+      success: false,
+      message: error.message || "Unable to mark leave.",
+    });
+  } finally {
+    await session.endSession();
   }
 };

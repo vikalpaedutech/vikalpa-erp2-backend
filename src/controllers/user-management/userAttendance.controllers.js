@@ -3,6 +3,8 @@ import mongoose from "mongoose";
 import { UserAttendance } from "../../models/user-management/userAttendance.models.js";
 
 import { User } from "../../models/user.models.js";
+import { BiometricUser } from "../../models/user-management/biometricUser.models.js";
+import { UserRole } from "../../models/user-management/userRole.models.js";
 
 import {
   uploadToSpaces,
@@ -817,6 +819,20 @@ export const getMyUserAttendance = async (req, res) => {
       }
     });
 
+    // Resolve this employee's configured office start/end times from the
+    // biometric user mapping (same empId -> User.userId mapping used by
+    // Attendance Management exports). This is scoped to the authenticated user.
+    const loggedInUser = await User.findById(userId).select("userId").lean();
+    const biometricUser = loggedInUser?.userId
+      ? await BiometricUser.findOne({ empId: String(loggedInUser.userId) })
+          .select("empId officeTime leaveTime")
+          .lean()
+      : null;
+    const officeTiming = {
+      officeTime: biometricUser?.officeTime || "",
+      leaveTime: biometricUser?.leaveTime || "",
+    };
+
     const holidayRows = await getMyAttendanceHolidayRows(userId, fromDate, toDate);
     const existingDateKeys = new Set(attendance
       .filter(record => ["Present", "WFH"].includes(record.status))
@@ -829,6 +845,7 @@ export const getMyUserAttendance = async (req, res) => {
       success: true,
       message: "User attendance fetched successfully.",
       data: combinedAttendance,
+      officeTiming,
       pagination: {
         total: total + visibleHolidayRows.length,
         page: pageNumber,
@@ -1053,8 +1070,35 @@ export const updateUserAttendance =
       }
 
 
+      // The User schema does not store an isAdmin flag. Admin access in
+      // this ERP is role-based, so resolve the active role mapping just as
+      // the permission middleware does. This allows Admin/Administrator
+      // users to manage other employees' attendance without weakening
+      // access for ordinary users.
+      const activeRoleMappings = await UserRole.find({
+        userId: loggedInUserId,
+        isActive: true,
+      })
+        .populate({
+          path: "roleId",
+          match: { isActive: true },
+          select: "roleCode roleName",
+        })
+        .lean();
+
+      const hasAdminRole = activeRoleMappings.some((mapping) => {
+        const role = mapping.roleId;
+        if (!role) return false;
+        const roleCode = String(role.roleCode || "").trim().toLowerCase();
+        const roleName = String(role.roleName || "").trim().toLowerCase();
+        return roleCode === "admin" ||
+          roleCode === "administrator" ||
+          roleName === "admin" ||
+          roleName === "administrator";
+      });
+
       const isAdmin =
-        loggedInUser.isAdmin === true;
+        loggedInUser.isAdmin === true || hasAdminRole;
 
 
       // ======================================================

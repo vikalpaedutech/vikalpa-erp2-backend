@@ -389,3 +389,37 @@ app.use(
 );
 
 export default app;
+
+// ============================================================
+// CENTRALIZED API ERROR HANDLER
+// Ensures ApiError validation details (including CSV row errors)
+// are returned as JSON so the frontend can render/download them.
+// ============================================================
+
+app.use((err, req, res, next) => {
+    if (res.headersSent) {
+        return next(err);
+    }
+
+    const statusCode = Number(err?.statusCode || err?.status || 500);
+    const safeStatusCode = statusCode >= 400 && statusCode <= 599
+        ? statusCode
+        : 500;
+
+    const response = {
+        success: false,
+        message: err?.message || "Something went wrong",
+    };
+
+    if (Array.isArray(err?.errors) && err.errors.length) {
+        response.errors = err.errors;
+    }
+
+    if (process.env.NODE_ENV !== "production" && err?.stack) {
+        console.error(err.stack);
+    } else if (safeStatusCode >= 500) {
+        console.error(err);
+    }
+
+    return res.status(safeStatusCode).json(response);
+});

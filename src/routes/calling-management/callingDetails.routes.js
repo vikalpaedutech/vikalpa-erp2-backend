@@ -17,6 +17,7 @@ import {
 } from "../../controllers/calling-management/callingDetails.controllers.js";
 
 import { verifyJWT } from "../../middlewares/auth.middlewares.js";
+import { uploadSpreadsheet } from "../../middlewares/upload.middlewares.js";
 
 
 const router = Router();
@@ -80,7 +81,10 @@ router
 
 router
     .route("/bulk-upload")
-    .post(bulkUploadCallingDetails);
+    .post(
+        uploadSpreadsheet.single("file"),
+        bulkUploadCallingDetails
+    );
 
 
 // ============================================================

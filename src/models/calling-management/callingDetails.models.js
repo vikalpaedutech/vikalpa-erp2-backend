@@ -21,6 +21,22 @@ const callingDetailsSchema = new Schema(
       default: null,
     },
 
+    // Generic identifier used by miscellaneous calling workflows.
+    uniqueDataId: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+
+    // Dynamic caller-facing fields configured through Key1/KeyValue1 ... Key10/KeyValue10.
+    keyValuePairs: {
+      type: [{
+        key: { type: String, trim: true },
+        value: { type: Schema.Types.Mixed },
+      }],
+      default: [],
+    },
+
     calledDistrict: {
     type: String,
     trim: true,

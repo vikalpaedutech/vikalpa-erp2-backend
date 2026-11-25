@@ -1033,71 +1033,38 @@ const downloadCallingDetailsTemplate = asyncHandler(
 
 
         const headers = [
-            "Calling Type",
-            "Enrollment ID",
-            "Student ID",
-            "Called District",
-            "Called Block",
-            "Called Center",
-            "Assigned To",
-            "Called To",
-            "Father",
-            "Contact 1",
-            "Contact 2",
-            "Contact 3",
-            "Calling Status",
-            "Remark",
-            "Comment",
-            "Additional Information 1",
-            "Additional Information 2",
-            "Additional Information 3",
-            "Additional Information 4",
-            "Additional Information 5",
-            "Additional Information 6",
-            "Additional Information 7",
-            "Additional Information 8",
-            "Additional Information 9",
-            "Additional Information 10",
-            "Additional Info",
-            "Calling Data",
+            "Calling Type", "Calling Data", "uniqueDataId", "AssignedTo",
+            "Contact1", "Contact2", "Contact3", "Calling Status", "Remark", "Comment",
+            ...Array.from({ length: 10 }, (_, index) => [
+                `Key${index + 1}`, `KeyValue${index + 1}`,
+            ]).flat(),
         ];
 
-
-        const row = [
-    callingType._id.toString(),
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    callingType.callingTo || "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-];
-
+        // Two instructional examples; upload skips rows whose uniqueDataId starts with Example:
+        const exampleRowOne = [
+            callingType._id.toString(), "Example: Miscellaneous calling", "Example: RECORD-001",
+            "000000000000000000000001", "9876543210", "", "",
+            (callingType.callingStatus || [])[0] || "", "Example: First follow-up",
+            "Example: Add relevant context",
+            "Father", "Example: Father name", "District", "Example: Gurugram",
+            "Block", "Example: Sohna", "Center", "Example: Government School",
+            "Class", "Example: Class 10", "", "", "", "", "", "", "", "", "", "",
+        ];
+        const exampleRowTwo = [
+            callingType._id.toString(), "Example: Parent calling", "Example: RECORD-002",
+            "000000000000000000000001", "9876543211", "9876543212", "",
+            (callingType.callingStatus || [])[0] || "", "Example: Second follow-up",
+            "Example: Additional context",
+            "Student", "Example: Student name", "Program", "Example: Mission Buniyaad",
+            "District", "Example: Faridabad", "School", "Example: Government School",
+            "", "", "", "", "", "", "", "", "", "", "", "",
+        ];
 
         const worksheet =
             XLSX.utils.aoa_to_sheet([
                 headers,
-                row,
+                exampleRowOne,
+                exampleRowTwo,
             ]);
 
 
@@ -1267,7 +1234,10 @@ const bulkUploadCallingDetails = asyncHandler(
 
         const requiredColumns = [
             "Calling Type",
-            "Called To",
+            "Calling Data",
+            "uniqueDataId",
+            "AssignedTo",
+            "Contact1",
         ];
 
 
@@ -1380,41 +1350,37 @@ const bulkUploadCallingDetails = asyncHandler(
             const rowNumber =
                 index + 2;
 
+            const uniqueDataIdCell =
+                String(row["uniqueDataId"] ?? "").trim();
 
-            // ========================================================
-            // CALLED TO
-            // ========================================================
-
-            const calledTo =
-                String(
-                    row["Called To"] || ""
-                ).trim();
-
-
-            if (!calledTo) {
-                errors.push(
-                    `Row ${rowNumber}: Called To is required`
-                );
-
+            // Ignore the two instructional rows in the downloaded template.
+            if (/^example\s*:/i.test(uniqueDataIdCell)) {
                 continue;
             }
 
+            const uniqueDataId = uniqueDataIdCell;
+            if (!uniqueDataId) {
+                errors.push(`Row ${rowNumber}: uniqueDataId is required`);
+                continue;
+            }
 
             // ========================================================
             // ENROLLMENT ID
             // ========================================================
 
-            const enrollmentId =
-                String(
-                    row["Enrollment ID"] || ""
-                ).trim();
+            const enrollmentIdRaw =
+                String(row["Enrollment ID"] ?? "").trim();
 
+            // Enrollment ID is optional. Treat blank cells and common spreadsheet
+            // placeholders as null instead of attempting ObjectId validation.
+            const enrollmentId =
+                /^(?:null|undefined|n\/a|na|none|optional|-)$/i.test(enrollmentIdRaw)
+                    ? ""
+                    : enrollmentIdRaw;
 
             if (
                 enrollmentId &&
-                !mongoose.Types.ObjectId.isValid(
-                    enrollmentId
-                )
+                !mongoose.Types.ObjectId.isValid(enrollmentId)
             ) {
                 errors.push(
                     `Row ${rowNumber}: Invalid Enrollment ID`
@@ -1478,7 +1444,7 @@ const bulkUploadCallingDetails = asyncHandler(
 
             const assignedToValue =
                 String(
-                    row["Assigned To"] || ""
+                    row["AssignedTo"] || row["Assigned To"] || ""
                 ).trim();
 
 
@@ -1493,6 +1459,19 @@ const bulkUploadCallingDetails = asyncHandler(
                         .filter(Boolean)
                     : [];
 
+
+            if (!assignedTo.length) {
+                errors.push(`Row ${rowNumber}: AssignedTo is required`);
+                continue;
+            }
+
+            const contact1Value = String(row["Contact1"] ?? row["Contact 1"] ?? "").trim();
+            if (!contact1Value) {
+                errors.push(`Row ${rowNumber}: Contact1 is required`);
+                continue;
+            }
+
+            const callingDataValue = String(row["Calling Data"] ?? "").trim();
 
             const invalidAssignedUser =
                 assignedTo.find(
@@ -1543,12 +1522,26 @@ const bulkUploadCallingDetails = asyncHandler(
             // ADD CALLING DETAILS OBJECT
             // ========================================================
 
+            const keyValuePairs = Array.from({ length: 10 }, (_, index) => {
+                const key = String(row[`Key${index + 1}`] ?? "").trim();
+                const rawValue = row[`KeyValue${index + 1}`];
+                const value = rawValue === null || rawValue === undefined
+                    ? ""
+                    : String(rawValue).trim();
+                return key && value ? { key, value } : null;
+            }).filter(Boolean);
+
             callingDetailsData.push({
                 callingTypeId:
                     callingType._id,
 
+                uniqueDataId,
+                keyValuePairs,
+
                 enrollmentId:
-                    enrollmentId || null,
+                    enrollmentId
+                        ? new mongoose.Types.ObjectId(enrollmentId)
+                        : null,
 
                 studentId:
                     studentId || null,
@@ -1564,26 +1557,22 @@ const bulkUploadCallingDetails = asyncHandler(
 
                 assignedTo,
 
-                calledTo,
-
-                father:
-                    String(
-                        row["Father"] || ""
-                    ).trim(),
+                calledTo: uniqueDataId,
+                father: "",
 
                 contact1:
                     String(
-                        row["Contact 1"] || ""
+                        contact1Value
                     ).trim(),
 
                 contact2:
                     String(
-                        row["Contact 2"] || ""
+                        row["Contact2"] || row["Contact 2"] || ""
                     ).trim(),
 
                 contact3:
                     String(
-                        row["Contact 3"] || ""
+                        row["Contact3"] || row["Contact 3"] || ""
                     ).trim(),
 
                 callingStatus,
@@ -1654,9 +1643,7 @@ const bulkUploadCallingDetails = asyncHandler(
                     ] || null,
 
                 callingData:
-                    row[
-                        "Calling Data"
-                    ] || null,
+                    callingDataValue || null,
             });
         }
 

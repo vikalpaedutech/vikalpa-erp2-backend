@@ -291,7 +291,9 @@ async function buildAttendanceHolidayOverlay({ userIds, fromDate, toDate }) {
 }
 
 export const getAttendanceHolidayOverlay = asyncHandler(async (req, res) => {
-  await requireHR(req);
+  // This read-only overlay is consumed by Attendance Management. Access is
+  // already gated by the authenticated attendance page; do not require a
+  // separate HR/Admin role for users who can access that page.
   const { fromDate, toDate } = req.query;
   const users = await User.find({ isActive: true }).select("_id").lean();
   const holidays = await buildAttendanceHolidayOverlay({

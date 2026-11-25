@@ -1743,19 +1743,21 @@ export const markAttendanceLeave = async (req, res) => {
           const previousLeave = await UserLeave.findById(existingAttendance.leaveId).session(session);
           await restoreAdminMarkedLeave(previousLeave, actorId, session, "Leave updated by authorized HR/Admin from Attendance Management.");
         } else {
-          if (existingAttendance.attendanceSource !== "Manual") {
-            throw new Error("Only manually marked attendance or an HR/Admin-marked leave can be replaced. Biometric/system records cannot be replaced here.");
-          }
+          // The Attendance Management page controls who can perform this action.
+          // Allow conversion of any existing attendance source (manual, biometric,
+          // or system-generated) into leave, rather than imposing a second role/source
+          // restriction here. Leave balance and overlap checks below still apply.
           await UserAttendance.deleteOne({ _id: existingAttendance._id }).session(session);
         }
       } else if (replaceAttendanceId) {
+        // A selected attendance record may originate from manual, biometric, or
+        // system attendance. The page-level access decision governs this operation.
         const oldRecord = await UserAttendance.findOne({
           _id: replaceAttendanceId,
           userId,
-          attendanceSource: "Manual",
         }).session(session);
         if (!oldRecord) {
-          throw new Error("The attendance record being edited could not be found or cannot be converted to leave.");
+          throw new Error("The attendance record being edited could not be found.");
         }
         await UserAttendance.deleteOne({ _id: oldRecord._id }).session(session);
       }

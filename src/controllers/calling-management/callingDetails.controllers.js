@@ -2277,55 +2277,15 @@ const exportCallingDetails = asyncHandler(
                                 .comment ||
                             "",
 
-                        "Additional Information 1":
-                            callingDetail
-                                .additionalInformation1 ??
-                            "",
-
-                        "Additional Information 2":
-                            callingDetail
-                                .additionalInformation2 ??
-                            "",
-
-                        "Additional Information 3":
-                            callingDetail
-                                .additionalInformation3 ??
-                            "",
-
-                        "Additional Information 4":
-                            callingDetail
-                                .additionalInformation4 ??
-                            "",
-
-                        "Additional Information 5":
-                            callingDetail
-                                .additionalInformation5 ??
-                            "",
-
-                        "Additional Information 6":
-                            callingDetail
-                                .additionalInformation6 ??
-                            "",
-
-                        "Additional Information 7":
-                            callingDetail
-                                .additionalInformation7 ??
-                            "",
-
-                        "Additional Information 8":
-                            callingDetail
-                                .additionalInformation8 ??
-                            "",
-
-                        "Additional Information 9":
-                            callingDetail
-                                .additionalInformation9 ??
-                            "",
-
-                        "Additional Information 10":
-                            callingDetail
-                                .additionalInformation10 ??
-                            "",
+                        ...Object.fromEntries(
+                            Array.from({ length: 10 }, (_, index) => {
+                                const pair = callingDetail.keyValuePairs?.[index] || {};
+                                return [
+                                    [`Key${index + 1}`, pair.key ?? ""],
+                                    [`KeyValue${index + 1}`, pair.value ?? ""],
+                                ];
+                            }).flat()
+                        ),
 
                         "Additional Info":
                             callingDetail

@@ -407,6 +407,8 @@ const getAttendance = async (queryParams = {}) => {
     centerId,
     class: studentClass,
     status,
+    page = 1,
+    limit = 100,
   } = queryParams;
 
 
@@ -671,6 +673,19 @@ const getAttendance = async (queryParams = {}) => {
   }
 
   // ----------------------------------------------------------
+  // PAGINATION (100 students per page by default)
+  // ----------------------------------------------------------
+
+  const pageNumber = Math.max(Number(page) || 1, 1);
+  const limitNumber = Math.min(Math.max(Number(limit) || 100, 1), 100);
+  const totalFiltered = filteredStudents.length;
+  const totalPages = Math.ceil(totalFiltered / limitNumber);
+  const paginatedStudents = filteredStudents.slice(
+    (pageNumber - 1) * limitNumber,
+    pageNumber * limitNumber
+  );
+
+  // ----------------------------------------------------------
   // Summary
   // ----------------------------------------------------------
 
@@ -711,7 +726,16 @@ const getAttendance = async (queryParams = {}) => {
           : 0,
     },
 
-    students: filteredStudents,
+    students: paginatedStudents,
+
+    pagination: {
+      page: pageNumber,
+      limit: limitNumber,
+      total: totalFiltered,
+      totalPages,
+      hasNextPage: pageNumber < totalPages,
+      hasPreviousPage: pageNumber > 1,
+    },
   };
 };
 

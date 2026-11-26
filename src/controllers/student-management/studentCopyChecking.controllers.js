@@ -1935,7 +1935,8 @@ export const getStudentCopyCheckingStudents = async (
     // ADMIN
     // ========================================================
 
-    let enrollmentMatch = {};
+    // Match Student Attendance: only active enrollments are eligible.
+    let enrollmentMatch = { status: "active" };
 
     if (isAdminUser(req)) {
       if (programId) {
@@ -2317,41 +2318,15 @@ export const getStudentCopyCheckingStudents = async (
     const studentMatch = {};
 
     if (search?.trim()) {
-      const searchRegex =
-        new RegExp(
-          search.trim(),
-          "i"
-        );
+      // Treat the input as literal text while using regex-based,
+      // case-insensitive partial matching (avoid invalid/pattern injection).
+      const escapedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRegex = new RegExp(escapedSearch, "i");
 
       studentMatch.$or = [
-        {
-          studentSrn:
-            searchRegex,
-        },
-        {
-          rollNumber:
-            searchRegex,
-        },
-        {
-          name:
-            searchRegex,
-        },
-        {
-          fatherName:
-            searchRegex,
-        },
-        {
-          motherName:
-            searchRegex,
-        },
-        {
-          personalContact:
-            searchRegex,
-        },
-        {
-          parentContact:
-            searchRegex,
-        },
+        { name: searchRegex },
+        { fatherName: searchRegex },
+        { rollNumber: searchRegex },
       ];
     }
 
